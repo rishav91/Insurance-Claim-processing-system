@@ -15,10 +15,6 @@ import { prisma } from "./client.js";
 export type PlanWithRules = Prisma.PlanGetPayload<{ include: { coverageRules: true } }>;
 export type ClaimWithLines = Prisma.ClaimGetPayload<{ include: { lineItems: true } }>;
 
-const notImplemented = (name: string): never => {
-  throw new Error(`repository ${name}() not implemented`);
-};
-
 // ── Reference data (seeded, not API-managed) ───────────────────────────────
 
 export interface RuleInput {
@@ -38,33 +34,60 @@ export interface PlanInput {
   rules: RuleInput[];
 }
 
-export function createMember(_data: { name: string; dateOfBirth: string }): Promise<Member> {
-  return notImplemented("createMember");
+/** Map a RuleInput to a Prisma create payload, omitting absent optionals
+ *  (exactOptionalPropertyTypes — never assign `undefined`). */
+function ruleCreate(r: RuleInput): Prisma.CoverageRuleCreateWithoutPlanInput {
+  return {
+    serviceType: r.serviceType,
+    ...(r.excluded !== undefined && { excluded: r.excluded }),
+    ...(r.allowedAmountCents !== undefined && { allowedAmountCents: r.allowedAmountCents }),
+    ...(r.copayCents !== undefined && { copayCents: r.copayCents }),
+    ...(r.coinsuranceRate !== undefined && { coinsuranceRate: r.coinsuranceRate }),
+    ...(r.annualLimitCents !== undefined && { annualLimitCents: r.annualLimitCents }),
+    ...(r.requiresManualReview !== undefined && {
+      requiresManualReview: r.requiresManualReview,
+    }),
+  };
 }
 
-export function createProvider(_data: { name: string }): Promise<Provider> {
-  return notImplemented("createProvider");
+export function createMember(data: { name: string; dateOfBirth: string }): Promise<Member> {
+  return prisma.member.create({ data });
 }
 
-export function createPlan(_data: PlanInput): Promise<PlanWithRules> {
-  return notImplemented("createPlan");
+export function createProvider(data: { name: string }): Promise<Provider> {
+  return prisma.provider.create({ data });
 }
 
-export function getPlanWithRules(_planId: string): Promise<PlanWithRules | null> {
-  return notImplemented("getPlanWithRules");
+export function createPlan(data: PlanInput): Promise<PlanWithRules> {
+  return prisma.plan.create({
+    data: {
+      name: data.name,
+      planYear: data.planYear,
+      deductibleAnnualCents: data.deductibleAnnualCents,
+      coverageRules: { create: data.rules.map(ruleCreate) },
+    },
+    include: { coverageRules: true },
+  });
 }
 
-export function createPolicy(_data: {
+export function getPlanWithRules(planId: string): Promise<PlanWithRules | null> {
+  return prisma.plan.findUnique({
+    where: { id: planId },
+    include: { coverageRules: true },
+  });
+}
+
+export function createPolicy(data: {
   memberId: string;
   planId: string;
   effectiveFrom: string;
   effectiveTo: string;
 }): Promise<Policy> {
-  return notImplemented("createPolicy");
+  return prisma.policy.create({ data });
 }
 
-export function getPoliciesForMember(_memberId: string): Promise<Policy[]> {
-  return notImplemented("getPoliciesForMember");
+export function getPoliciesForMember(memberId: string): Promise<Policy[]> {
+  return prisma.policy.findMany({ where: { memberId } });
 }
 
 // ── Claims & lines ─────────────────────────────────────────────────────────
@@ -76,12 +99,26 @@ export interface LinePersistInput {
   diagnosisCode?: string;
 }
 
-export function createClaim(_data: {
+export function createClaim(data: {
   memberId: string;
   providerId: string;
   lines: LinePersistInput[];
 }): Promise<ClaimWithLines> {
-  return notImplemented("createClaim");
+  return prisma.claim.create({
+    data: {
+      memberId: data.memberId,
+      providerId: data.providerId,
+      lineItems: {
+        create: data.lines.map((l) => ({
+          serviceType: l.serviceType,
+          serviceDate: l.serviceDate,
+          billedAmountCents: l.billedAmountCents,
+          ...(l.diagnosisCode !== undefined && { diagnosisCode: l.diagnosisCode }),
+        })),
+      },
+    },
+    include: { lineItems: true },
+  });
 }
 
 // ── Accumulator ledger ─────────────────────────────────────────────────────
@@ -91,7 +128,7 @@ export interface AccumulatorSums {
   benefitUsedByServiceType: Record<string, number>;
 }
 
-export function writeAccumulatorEntry(_data: {
+export function writeAccumulatorEntry(data: {
   lineItemId: string;
   memberId: string;
   planYear: number;
@@ -99,19 +136,39 @@ export function writeAccumulatorEntry(_data: {
   deductibleDeltaCents: number;
   benefitDeltaCents: number;
 }): Promise<AccumulatorEntry> {
-  return notImplemented("writeAccumulatorEntry");
+  return prisma.accumulatorEntry.create({ data });
 }
 
-export function voidAccumulatorEntryForLine(_lineItemId: string): Promise<void> {
-  return notImplemented("voidAccumulatorEntryForLine");
+/** Void the ledger entry for a line (dispute/resolution reversal, §6). */
+export async function voidAccumulatorEntryForLine(lineItemId: string): Promise<void> {
+  await prisma.accumulatorEntry.update({
+    where: { lineItemId },
+    data: { voided: true },
+  });
 }
 
-/** Usage = SUM of active (non-voided) entries for (member, planYear). */
-export function loadAccumulators(
-  _memberId: string,
-  _planYear: number,
+/**
+ * Usage as a SUM on read: aggregate active (non-voided) entries for
+ * (member, planYear). The deductible is a single annual figure (sum across all
+ * service types); the benefit limit is per service type.
+ */
+export async function loadAccumulators(
+  memberId: string,
+  planYear: number,
 ): Promise<AccumulatorSums> {
-  return notImplemented("loadAccumulators");
+  const grouped = await prisma.accumulatorEntry.groupBy({
+    by: ["serviceType"],
+    where: { memberId, planYear, voided: false },
+    _sum: { deductibleDeltaCents: true, benefitDeltaCents: true },
+  });
+
+  let deductibleMetCents = 0;
+  const benefitUsedByServiceType: Record<string, number> = {};
+  for (const g of grouped) {
+    deductibleMetCents += g._sum.deductibleDeltaCents ?? 0;
+    benefitUsedByServiceType[g.serviceType] = g._sum.benefitDeltaCents ?? 0;
+  }
+  return { deductibleMetCents, benefitUsedByServiceType };
 }
 
 export { prisma };
