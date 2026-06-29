@@ -572,10 +572,64 @@ export async function resolveDispute(
 }
 
 /** Reviewer resolves a pended (manual-review) line: `approve` (run engine) or `deny`. */
-export function reviewLine(
-  _lineItemId: string,
-  _action: ReviewAction,
-  _opts?: ResolutionOptions,
+export async function reviewLine(
+  lineItemId: string,
+  action: ReviewAction,
+  opts: ResolutionOptions = {},
 ): Promise<ClaimView> {
-  throw new Error("reviewLine() not implemented");
+  const ctx = await loadLineContext(lineItemId);
+  if (ctx.lineItem.status !== "pended") {
+    throw new Error(
+      `line ${lineItemId} is not pending review (status: ${ctx.lineItem.status})`,
+    );
+  }
+
+  await prisma.$transaction(
+    async (tx) => {
+      await tx.member.update({
+        where: { id: ctx.claim.memberId },
+        data: { version: { increment: 1 } },
+      });
+
+      let toState: LineStatus;
+      if (action === "approve") {
+        toState = await rerunLineInTx(tx, ctx, opts.overrides);
+      } else {
+        // Deny: finalize with no money or ledger effect (a pended line had none).
+        toState = "denied";
+        const reason: Reason = {
+          code: "REVIEW_DENIED",
+          message: opts.note ?? "Denied on manual review",
+        };
+        await tx.lineItem.update({
+          where: { id: lineItemId },
+          data: {
+            status: "denied",
+            allowedCents: 0,
+            payableCents: 0,
+            memberResponsibilityCents: 0,
+            deductibleAppliedCents: 0,
+            memberCostShareCents: 0,
+            reasons: JSON.stringify([reason]),
+          },
+        });
+      }
+
+      await tx.event.create({
+        data: {
+          claimId: ctx.claim.id,
+          lineItemId,
+          type: "RESOLVED",
+          fromState: "pended",
+          toState,
+          actor: "reviewer",
+          ...(opts.note !== undefined && { note: opts.note }),
+          ...(opts.overrides && { overridesApplied: JSON.stringify(opts.overrides) }),
+        },
+      });
+    },
+    { maxWait: 10_000, timeout: 20_000 },
+  );
+
+  return (await getClaim(ctx.claim.id))!;
 }

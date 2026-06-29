@@ -23,7 +23,8 @@ export type ReasonCode =
   | "COINSURANCE_APPLIED"
   | "COVERED"
   | "PARTIALLY_PAID"
-  | "LIMIT_EXHAUSTED";
+  | "LIMIT_EXHAUSTED"
+  | "REVIEW_DENIED"; // a reviewer denied a pended manual-review line (§6)
 
 export interface Reason {
   code: ReasonCode;
