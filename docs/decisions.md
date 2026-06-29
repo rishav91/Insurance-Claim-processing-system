@@ -120,6 +120,20 @@ row before summing the ledger, so the sum→decide→insert sequence is atomic. 
 single-writer model makes this concrete locally; the Postgres equivalent is
 `SELECT … FOR UPDATE` on the member/policy row. Stated as an invariant with a test.
 
+**How it's made concrete (Phase 3):** `adjudicateClaim` runs in one Prisma
+interactive transaction that first bumps `Member.version` (the write that takes the
+row lock) *before* summing the ledger, and the SQLite client is pinned to
+`connection_limit=1` so two concurrent claims for a member serialize on the single
+writer rather than racing the same sum→decide→insert. The spec *concurrent claims
+for one member do not overspend a shared limit* fails without this. Trade-off: a
+single connection over-serializes (different members can't proceed in parallel
+locally) — acceptable for SQLite; the Postgres refinement is the per-row `FOR UPDATE`.
+
+**Schema management:** I use `prisma db push` (schema is the source of truth) rather
+than a migration history. For a greenfield take-home with no production data to
+evolve, migrations would be ceremony; the schema file + `db push` is reproducible
+from a clean DB, which is what the README flow needs.
+
 ## 6. What I deliberately did NOT build (calibrated cuts)
 
 Each of these is a conscious trade-off; none is an accident.

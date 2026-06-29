@@ -60,28 +60,30 @@ Make the entities durable; the schema doubles as living domain-model docs.
 - Test harness: vitest `globalSetup` pushes a fresh SQLite schema; single fork so
   the single-writer ledger invariant is exercised, not masked.
 
-## Phase 3 — Orchestration service 🔜
+## Phase 3 — Orchestration service ✅ (46 specs, tsc clean)
 Wire the pure engine to the database. This is where the "gather facts" work lives.
-- ⬜ `submitClaim(input)` → persist claim + lines as `submitted`, append a
+- ✅ `submitClaim(input)` → persist claim + lines as `submitted`, append a
   `SUBMITTED` event. No adjudication yet (two-step decision, decisions.md §4).
-- ⬜ `adjudicateClaim(claimId)`:
+- ✅ `adjudicateClaim(claimId)`:
   1. load member → policy → **plan** → rules; match a rule per line's serviceType.
   2. compute `coverageActive` (policy effective window vs serviceDate).
-  3. detect duplicates (prior non-denied line on
-     `(member, serviceType, serviceDate, provider)`).
+  3. detect duplicates (prior adjudicated non-denied line on
+     `(member, serviceType, serviceDate, provider)`, on a different claim).
   4. **sum the active ledger entries** for the relevant `(member, planYear, serviceType)`.
   5. call the pure `adjudicateClaim` engine.
-  6. **in ONE transaction that locks the member/policy row**: write one
-     `AccumulatorEntry` per finalized line, persist line results, append events.
-- ⬜ `getClaim(id)` → claim + lines + per-line adjudication breakdown + reasons (+ events).
-- **Tests (domain-level, against a test DB):**
+  6. **in ONE transaction that locks the member row** (`Member.version` bump +
+     SQLite `connection_limit=1`): write one `AccumulatorEntry` per finalized
+     line, persist line results, append `ADJUDICATED`/`PENDED` events.
+- ✅ `getClaim(id)` → claim + lines + per-line adjudication breakdown + reasons (+ events).
+- ✅ **Tests (domain-level, against a test DB):**
   - deductible depletes across **two separate claims** (the cross-claim spec).
   - `benefitUsed` reads as the sum of active ledger entries.
   - concurrent submissions for one member don't overspend a limit
     (serialization invariant).
   - a duplicate line on a second claim is denied `DUPLICATE`.
+  - (bonus) out-of-window line → `COVERAGE_INACTIVE`; `requiresManualReview` → pended.
 
-## Phase 4 — Disputes & manual-review resolution ⬜
+## Phase 4 — Disputes & manual-review resolution 🔜
 One reconciliation path (domain-model.md §6).
 - ⬜ `disputeLine(lineId, reason)` → line `disputed`, claim re-derives.
 - ⬜ `resolveLine(lineId, action, overrides?, note)`:
