@@ -104,22 +104,18 @@ One reconciliation path (domain-model.md §6).
   - the **order-dependence** spec (overturn can push benefitUsed past cap) — the
     documented limitation, made visible.
 
-## Phase 5 — REST API (Fastify) 🔜
+## Phase 5 — REST API (Fastify) ✅ (67 specs, tsc clean)
 The interface to demo with. Thin handlers over the service; validation with zod.
-Full contract → `docs/api.md`.
-- ⬜ `POST /v1/claims` — submit a claim with line items (→ `submitted`).
-- ⬜ `POST /v1/claims/:id/adjudicate` — run the engine (→ decisions).
-- ⬜ `GET /v1/claims/:id` — claim + line decisions + explanations + event timeline.
-- ⬜ `GET /v1/claims?memberId=` — list a member's claims.
-- ⬜ `POST /v1/claims/:id/pay` — finalize an approved/partial claim (→ `paid`).
-- ⬜ `POST /v1/lineitems/:id/dispute` — open a dispute.
-- ⬜ `GET /v1/disputes/:id` — dispute detail/status.
-- ⬜ `POST /v1/disputes/:id/resolve` — uphold/overturn (+ overrides).
-- ⬜ `POST /v1/lineitems/:id/review` — resolve a pended line.
-- ⬜ `GET /v1/members/:id/accumulators` — deductible met + benefit used per service/year.
-- ⬜ Validation: malformed → 422 (claim not created); domain-invalid → adjudicated `denied`.
-- **Tests:** a couple of API-level happy/edge paths (not status-code-only —
-  assert the adjudication payload).
+Full contract → `docs/api.md`. Runnable via `npm run dev` (tsx).
+- ✅ All 10 endpoints wired as thin handlers (`src/http/app.ts`): submit,
+  adjudicate, get/list claims, pay, dispute, get/resolve dispute, review pended,
+  member accumulators.
+- ✅ zod-validated bodies; the nested `adjudication` wire shape; one error envelope.
+- ✅ Validation: malformed → 422 (no claim created); conflicting
+  `OVERRIDE_ALLOWED_AMOUNT` → 422; illegal transitions → 409; unknown id → 404.
+  Domain-invalid lines still create the claim and adjudicate to `denied`.
+- ✅ **Tests:** fastify.inject happy/edge paths asserting the adjudication payload
+  (submit→adjudicate partial, dispute→overturn, accumulators), not just codes.
 
 ## Phase 6 — Seed data ⬜
 - ⬜ Seed script: a member + policy with a realistic rule set (office visit with
