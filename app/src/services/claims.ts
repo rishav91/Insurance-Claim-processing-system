@@ -33,6 +33,7 @@ import {
   writeAccumulatorEntry,
   type DbClient,
 } from "../db/repositories.js";
+import { ConflictError, NotFoundError } from "./errors.js";
 
 export interface SubmitLineInput {
   serviceType: string;
@@ -235,14 +236,20 @@ export async function adjudicateClaim(claimId: string): Promise<ClaimView> {
     where: { id: claimId },
     include: { lineItems: true },
   });
-  if (!claim) throw new Error(`claim ${claimId} not found`);
+  if (!claim) throw new NotFoundError(`claim ${claimId} not found`);
+
+  // Two-step flow: a claim is adjudicated once. Re-adjudication is a 409 — the
+  // dispute/review path (§6) handles changing a finalized line, not this endpoint.
+  if (!claim.lineItems.every((l) => l.status === "submitted")) {
+    throw new ConflictError(`claim ${claimId} has already been adjudicated`);
+  }
 
   // Reference data (immutable): the member's policy → plan → coverage rules.
   const policy = await prisma.policy.findFirst({
     where: { memberId: claim.memberId },
     include: { plan: { include: { coverageRules: true } } },
   });
-  if (!policy) throw new Error(`no policy found for member ${claim.memberId}`);
+  if (!policy) throw new NotFoundError(`no policy found for member ${claim.memberId}`);
   const plan = policy.plan;
   const ruleByService = new Map(plan.coverageRules.map((r) => [r.serviceType, r]));
 
@@ -391,23 +398,100 @@ export interface MemberAccumulatorsView {
   limitsByServiceType: Record<string, number>;
 }
 
-export function payClaim(_claimId: string): Promise<ClaimView> {
-  throw new Error("payClaim() not implemented");
+/** Line states whose payable amount is disbursed on payment. */
+const PAYABLE_LINE: ReadonlySet<string> = new Set(["approved", "partially_approved"]);
+
+/**
+ * Finalize an `approved`/`partially_approved` claim: move its non-denied lines to
+ * `paid`, record `paidAmountCents` (Σ payable) + `paidAt`, append a PAID event.
+ * `paid` is terminal — paid lines are no longer disputable (§4).
+ */
+export async function payClaim(claimId: string): Promise<ClaimView> {
+  const claim = await prisma.claim.findUnique({
+    where: { id: claimId },
+    include: { lineItems: true },
+  });
+  if (!claim) throw new NotFoundError(`claim ${claimId} not found`);
+
+  const status = deriveClaimStatus(claim.lineItems.map((l) => l.status as LineStatus));
+  if (status !== "approved" && status !== "partially_approved") {
+    throw new ConflictError(
+      `claim ${claimId} is not in a payable state (status: ${status})`,
+    );
+  }
+
+  const payLines = claim.lineItems.filter((l) => PAYABLE_LINE.has(l.status));
+  const paidAmountCents = payLines.reduce((sum, l) => sum + (l.payableCents ?? 0), 0);
+
+  await prisma.$transaction(async (tx) => {
+    for (const l of payLines) {
+      await tx.lineItem.update({ where: { id: l.id }, data: { status: "paid" } });
+    }
+    await tx.claim.update({
+      where: { id: claimId },
+      data: { paidAmountCents, paidAt: new Date() },
+    });
+    await tx.event.create({
+      data: { claimId, type: "PAID", toState: "paid", actor: "system" },
+    });
+  });
+
+  return (await getClaim(claimId))!;
 }
 
-export function listClaims(_memberId: string): Promise<ClaimSummary[]> {
-  throw new Error("listClaims() not implemented");
+export async function listClaims(memberId: string): Promise<ClaimSummary[]> {
+  const claims = await prisma.claim.findMany({
+    where: { memberId },
+    include: { lineItems: true },
+    orderBy: { submittedAt: "asc" },
+  });
+  return claims.map((c) => ({
+    id: c.id,
+    status: deriveClaimStatus(c.lineItems.map((l) => l.status as LineStatus)),
+    submittedAt: c.submittedAt,
+    lineCount: c.lineItems.length,
+    totalPayableCents: c.lineItems.reduce((sum, l) => sum + (l.payableCents ?? 0), 0),
+  }));
 }
 
-export function getDispute(_disputeId: string): Promise<DisputeView | null> {
-  throw new Error("getDispute() not implemented");
+export async function getDispute(disputeId: string): Promise<DisputeView | null> {
+  const d = await prisma.dispute.findUnique({ where: { id: disputeId } });
+  if (!d) return null;
+  return {
+    id: d.id,
+    lineItemId: d.lineItemId,
+    status: d.status,
+    reason: d.reason,
+    resolution: d.resolution,
+    overrides: d.overrides ? (JSON.parse(d.overrides) as Override[]) : null,
+    note: d.note,
+  };
 }
 
-export function getMemberAccumulators(
-  _memberId: string,
-  _planYear: number,
+export async function getMemberAccumulators(
+  memberId: string,
+  planYear: number,
 ): Promise<MemberAccumulatorsView> {
-  throw new Error("getMemberAccumulators() not implemented");
+  const policy = await prisma.policy.findFirst({
+    where: { memberId },
+    include: { plan: { include: { coverageRules: true } } },
+  });
+  if (!policy) throw new NotFoundError(`no policy found for member ${memberId}`);
+
+  const acc = await loadAccumulators(memberId, planYear);
+  const limitsByServiceType: Record<string, number> = {};
+  for (const r of policy.plan.coverageRules) {
+    if (r.annualLimitCents !== null) limitsByServiceType[r.serviceType] = r.annualLimitCents;
+  }
+
+  return {
+    memberId,
+    planYear,
+    deductibleAnnualCents: policy.plan.deductibleAnnualCents,
+    deductibleMetCents: acc.deductibleMetCents,
+    benefitUsedByServiceType: acc.benefitUsedByServiceType,
+    limitsByServiceType,
+  };
 }
 
 /** Decided, pre-payment line states that may be disputed (§4). */
@@ -431,13 +515,15 @@ async function loadLineContext(lineItemId: string): Promise<LineContext> {
     where: { id: lineItemId },
     include: { claim: true },
   });
-  if (!lineItem) throw new Error(`line ${lineItemId} not found`);
+  if (!lineItem) throw new NotFoundError(`line ${lineItemId} not found`);
 
   const policy = await prisma.policy.findFirst({
     where: { memberId: lineItem.claim.memberId },
     include: { plan: { include: { coverageRules: true } } },
   });
-  if (!policy) throw new Error(`no policy found for member ${lineItem.claim.memberId}`);
+  if (!policy) {
+    throw new NotFoundError(`no policy found for member ${lineItem.claim.memberId}`);
+  }
 
   return {
     lineItem,
@@ -529,9 +615,9 @@ export async function disputeLine(
   reason: string,
 ): Promise<ClaimView> {
   const lineItem = await prisma.lineItem.findUnique({ where: { id: lineItemId } });
-  if (!lineItem) throw new Error(`line ${lineItemId} not found`);
+  if (!lineItem) throw new NotFoundError(`line ${lineItemId} not found`);
   if (!DISPUTABLE.has(lineItem.status)) {
-    throw new Error(
+    throw new ConflictError(
       `line ${lineItemId} is not disputable (status: ${lineItem.status})`,
     );
   }
@@ -568,8 +654,9 @@ export async function resolveDispute(
 ): Promise<ClaimView> {
   const ctx = await loadLineContext(lineItemId);
   const dispute = await prisma.dispute.findUnique({ where: { lineItemId } });
-  if (!dispute || dispute.status !== "open") {
-    throw new Error(`no open dispute for line ${lineItemId}`);
+  if (!dispute) throw new NotFoundError(`no dispute for line ${lineItemId}`);
+  if (dispute.status !== "open") {
+    throw new ConflictError(`dispute for line ${lineItemId} is already resolved`);
   }
 
   await prisma.$transaction(
@@ -628,7 +715,7 @@ export async function reviewLine(
 ): Promise<ClaimView> {
   const ctx = await loadLineContext(lineItemId);
   if (ctx.lineItem.status !== "pended") {
-    throw new Error(
+    throw new ConflictError(
       `line ${lineItemId} is not pending review (status: ${ctx.lineItem.status})`,
     );
   }
