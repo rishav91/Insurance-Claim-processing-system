@@ -155,7 +155,7 @@ not a stored total:
 | Field | Notes |
 |---|---|
 | id | |
-| lineItemId | the line that produced this entry (1:1) |
+| lineItemId | the line that produced this entry. **At most one *active* entry per line**; a dispute reversal voids the old one and writes a new one, so over time a line may have several rows (one active + voided audit copies) — *not* a DB unique key |
 | memberId | whose usage this counts against |
 | planYear | `calendarYear(line.serviceDate)` |
 | serviceType | for per-service benefit limits |
@@ -212,6 +212,7 @@ One row per state transition, never updated or deleted:
 |---|---|
 | lineItemId | the disputed line |
 | reason | member's stated reason |
+| fromStatus | the line's decided status before the dispute, restored on `uphold` |
 | status | `open → resolved` |
 | resolution | `uphold` or `overturn` |
 | overrides? | `Set<{type, value?}>` applied on overturn (taxonomy in §5) |
@@ -452,7 +453,7 @@ one** — no in-place arithmetic, and the voided entry stays as an audit record 
 the decision *used to* consume.
 
 - **Pended line review** — `approve` runs the engine and applies the delta;
-  `deny` finalizes with a reason.
+  `deny` finalizes the line `denied` with a `REVIEW_DENIED` reason and no ledger effect.
 - **Dispute overturn** — reviewer supplies one or more `override` directives from the
   taxonomy in §5 (e.g. `WAIVE_LIMIT`, `WAIVE_DEDUCTIBLE`, or a parameterized
   `OVERRIDE_ALLOWED_AMOUNT`); the engine recomputes the money with those exceptions

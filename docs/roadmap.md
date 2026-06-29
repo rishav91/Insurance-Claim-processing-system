@@ -83,22 +83,28 @@ Wire the pure engine to the database. This is where the "gather facts" work live
   - a duplicate line on a second claim is denied `DUPLICATE`.
   - (bonus) out-of-window line → `COVERAGE_INACTIVE`; `requiresManualReview` → pended.
 
-## Phase 4 — Disputes & manual-review resolution 🔜
+## Phase 4 — Disputes & manual-review resolution ✅ (54 specs, tsc clean)
 One reconciliation path (domain-model.md §6).
-- ⬜ `disputeLine(lineId, reason)` → line `disputed`, claim re-derives.
-- ⬜ `resolveLine(lineId, action, overrides?, note)`:
-  void prior `AccumulatorEntry` → re-run `adjudicateLine` (with `skipManualReview`
-  and any overrides) → write a fresh entry → re-derive claim status → append
-  `RESOLVED` event, all in one txn.
-- ⬜ Guard: a `paid` line is **not** disputable (documented cut).
-- **Tests:**
+- ✅ `disputeLine(lineId, reason)` → line `disputed`, claim re-derives; records the
+  pre-dispute status on the `Dispute` (`fromStatus`) so `uphold` can restore it.
+- ✅ `resolveDispute(lineId, uphold|overturn, overrides?, note)` and
+  `reviewLine(lineId, approve|deny, …)` share one core: void the prior active
+  `AccumulatorEntry` → re-run `adjudicateLine` (`skipManualReview` + overrides) →
+  write a fresh entry → re-derive claim status → append `RESOLVED`, all in one
+  member-locked txn. `uphold` restores the original outcome; `deny` finalizes
+  denied (`REVIEW_DENIED`) with no ledger effect.
+- ✅ Guard: a `paid` (and `pended`) line is **not** disputable.
+- ✅ **Schema fix the model forced:** `AccumulatorEntry.lineItemId` is no longer
+  `@unique` — a line keeps voided entries (audit) alongside one active entry.
+- ✅ **Tests:**
   - overturn a denied line with `WAIVE_LIMIT` → it pays; accumulators move.
   - combine `{WAIVE_DEDUCTIBLE, WAIVE_LIMIT}` in one resolution.
   - resolve a pended line via `approve` applies the delta; `deny` applies none.
+  - void-then-rewrite leaves usage = Σ active entries (no drift); old entry voided.
   - the **order-dependence** spec (overturn can push benefitUsed past cap) — the
     documented limitation, made visible.
 
-## Phase 5 — REST API (Fastify) ⬜
+## Phase 5 — REST API (Fastify) 🔜
 The interface to demo with. Thin handlers over the service; validation with zod.
 Full contract → `docs/api.md`.
 - ⬜ `POST /v1/claims` — submit a claim with line items (→ `submitted`).
