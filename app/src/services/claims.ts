@@ -12,7 +12,13 @@ import type {
   Event,
   LineItem,
 } from "@prisma/client";
-import type { ClaimStatus, CoverageRule, LineStatus, Reason } from "../domain/types.js";
+import type {
+  ClaimStatus,
+  CoverageRule,
+  LineStatus,
+  Override,
+  Reason,
+} from "../domain/types.js";
 import { deriveClaimStatus } from "../domain/claim-status.js";
 import {
   adjudicateClaim as adjudicateClaimEngine,
@@ -294,7 +300,7 @@ export async function adjudicateClaim(claimId: string): Promise<ClaimView> {
       });
 
       // Persist: line breakdown + ledger entry per finalized line + events.
-      const lineById = new Map(claim.lineItems.map((l) => [l.id, l]));
+      const lineById = new Map<string, LineItem>(claim.lineItems.map((l) => [l.id, l]));
       for (const { id, result: r } of result.lines) {
         await tx.lineItem.update({
           where: { id },
@@ -341,4 +347,37 @@ export async function adjudicateClaim(claimId: string): Promise<ClaimView> {
   );
 
   return (await getClaim(claimId))!;
+}
+
+// ── Phase 4: disputes & manual-review resolution (domain-model.md §6) ─────────
+
+export type ReviewAction = "approve" | "deny";
+export type DisputeResolution = "uphold" | "overturn";
+
+export interface ResolutionOptions {
+  overrides?: Override[];
+  note?: string;
+}
+
+/** A member contests a resolved (pre-payment) line → `disputed`, claim re-derives. */
+export function disputeLine(_lineItemId: string, _reason: string): Promise<ClaimView> {
+  throw new Error("disputeLine() not implemented");
+}
+
+/** Reviewer resolves a dispute: `uphold` (no change) or `overturn` (+overrides). */
+export function resolveDispute(
+  _lineItemId: string,
+  _resolution: DisputeResolution,
+  _opts?: ResolutionOptions,
+): Promise<ClaimView> {
+  throw new Error("resolveDispute() not implemented");
+}
+
+/** Reviewer resolves a pended (manual-review) line: `approve` (run engine) or `deny`. */
+export function reviewLine(
+  _lineItemId: string,
+  _action: ReviewAction,
+  _opts?: ResolutionOptions,
+): Promise<ClaimView> {
+  throw new Error("reviewLine() not implemented");
 }
