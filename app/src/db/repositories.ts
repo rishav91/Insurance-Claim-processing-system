@@ -145,10 +145,13 @@ export function writeAccumulatorEntry(
   return db.accumulatorEntry.create({ data });
 }
 
-/** Void the ledger entry for a line (dispute/resolution reversal, §6). */
-export async function voidAccumulatorEntryForLine(lineItemId: string): Promise<void> {
-  await prisma.accumulatorEntry.update({
-    where: { lineItemId },
+/** Void the active ledger entry for a line (dispute/resolution reversal, §6). */
+export async function voidAccumulatorEntryForLine(
+  lineItemId: string,
+  db: DbClient = prisma,
+): Promise<void> {
+  await db.accumulatorEntry.updateMany({
+    where: { lineItemId, voided: false },
     data: { voided: true },
   });
 }

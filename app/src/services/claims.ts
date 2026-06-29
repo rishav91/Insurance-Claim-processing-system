@@ -25,9 +25,11 @@ import {
   planYearOf,
   type ClaimLineForAdjudication,
 } from "../domain/adjudicate-claim.js";
+import { adjudicateLine, type AdjudicationContext } from "../domain/adjudicate.js";
 import { prisma } from "../db/client.js";
 import {
   loadAccumulators,
+  voidAccumulatorEntryForLine,
   writeAccumulatorEntry,
   type DbClient,
 } from "../db/repositories.js";
@@ -359,18 +361,214 @@ export interface ResolutionOptions {
   note?: string;
 }
 
+/** Decided, pre-payment line states that may be disputed (§4). */
+const DISPUTABLE: ReadonlySet<string> = new Set([
+  "approved",
+  "partially_approved",
+  "denied",
+]);
+
+interface LineContext {
+  lineItem: LineItem;
+  claim: Claim;
+  policy: { effectiveFrom: string; effectiveTo: string };
+  plan: { deductibleAnnualCents: number };
+  rule: PrismaCoverageRule | undefined;
+}
+
+/** Load a line plus the reference data the engine needs to re-adjudicate it. */
+async function loadLineContext(lineItemId: string): Promise<LineContext> {
+  const lineItem = await prisma.lineItem.findUnique({
+    where: { id: lineItemId },
+    include: { claim: true },
+  });
+  if (!lineItem) throw new Error(`line ${lineItemId} not found`);
+
+  const policy = await prisma.policy.findFirst({
+    where: { memberId: lineItem.claim.memberId },
+    include: { plan: { include: { coverageRules: true } } },
+  });
+  if (!policy) throw new Error(`no policy found for member ${lineItem.claim.memberId}`);
+
+  return {
+    lineItem,
+    claim: lineItem.claim,
+    policy,
+    plan: policy.plan,
+    rule: policy.plan.coverageRules.find((r) => r.serviceType === lineItem.serviceType),
+  };
+}
+
+/**
+ * The single reconciliation path (§6): void the line's prior active ledger entry,
+ * re-run the pure engine against the CURRENT ledger (skipping manual review, with
+ * any overrides), persist the new breakdown, and write a fresh entry for the delta.
+ * Returns the new outcome. Must run inside the caller's locked transaction.
+ */
+async function rerunLineInTx(
+  tx: DbClient,
+  ctx: LineContext,
+  overrides?: Override[],
+): Promise<LineStatus> {
+  const { lineItem, claim, policy, plan, rule } = ctx;
+
+  await voidAccumulatorEntryForLine(lineItem.id, tx);
+
+  const year = planYearOf(lineItem.serviceDate);
+  const acc = await loadAccumulators(claim.memberId, year, tx);
+
+  const adjCtx: AdjudicationContext = {
+    ...(rule && { rule: toEngineRule(rule) }),
+    coverageActive: coverageActiveOn(
+      lineItem.serviceDate,
+      policy.effectiveFrom,
+      policy.effectiveTo,
+    ),
+    isDuplicate: false,
+    accumulator: {
+      deductibleAnnualCents: plan.deductibleAnnualCents,
+      deductibleMetCents: acc.deductibleMetCents,
+      benefitUsedCents: acc.benefitUsedByServiceType[lineItem.serviceType] ?? 0,
+    },
+    skipManualReview: true,
+    ...(overrides && overrides.length > 0 && { overrides }),
+  };
+
+  const r = adjudicateLine(
+    {
+      serviceType: lineItem.serviceType,
+      serviceDate: lineItem.serviceDate,
+      billedAmountCents: lineItem.billedAmountCents,
+    },
+    adjCtx,
+  );
+
+  await tx.lineItem.update({
+    where: { id: lineItem.id },
+    data: {
+      status: r.outcome,
+      allowedCents: r.allowedCents,
+      payableCents: r.payableCents,
+      memberResponsibilityCents: r.memberResponsibilityCents,
+      deductibleAppliedCents: r.deductibleAppliedCents,
+      memberCostShareCents: r.memberCostShareCents,
+      reasons: JSON.stringify(r.reasons),
+    },
+  });
+
+  const d = r.accumulatorDelta;
+  if (d.deductibleMetCents > 0 || d.benefitUsedCents > 0) {
+    await writeAccumulatorEntry(
+      {
+        lineItemId: lineItem.id,
+        memberId: claim.memberId,
+        planYear: year,
+        serviceType: lineItem.serviceType,
+        deductibleDeltaCents: d.deductibleMetCents,
+        benefitDeltaCents: d.benefitUsedCents,
+      },
+      tx,
+    );
+  }
+
+  return r.outcome as LineStatus;
+}
+
 /** A member contests a resolved (pre-payment) line → `disputed`, claim re-derives. */
-export function disputeLine(_lineItemId: string, _reason: string): Promise<ClaimView> {
-  throw new Error("disputeLine() not implemented");
+export async function disputeLine(
+  lineItemId: string,
+  reason: string,
+): Promise<ClaimView> {
+  const lineItem = await prisma.lineItem.findUnique({ where: { id: lineItemId } });
+  if (!lineItem) throw new Error(`line ${lineItemId} not found`);
+  if (!DISPUTABLE.has(lineItem.status)) {
+    throw new Error(
+      `line ${lineItemId} is not disputable (status: ${lineItem.status})`,
+    );
+  }
+
+  await prisma.$transaction(async (tx) => {
+    await tx.dispute.create({
+      data: { lineItemId, reason, fromStatus: lineItem.status, status: "open" },
+    });
+    await tx.lineItem.update({
+      where: { id: lineItemId },
+      data: { status: "disputed" },
+    });
+    await tx.event.create({
+      data: {
+        claimId: lineItem.claimId,
+        lineItemId,
+        type: "DISPUTED",
+        fromState: lineItem.status,
+        toState: "disputed",
+        actor: "member",
+        note: reason,
+      },
+    });
+  });
+
+  return (await getClaim(lineItem.claimId))!;
 }
 
 /** Reviewer resolves a dispute: `uphold` (no change) or `overturn` (+overrides). */
-export function resolveDispute(
-  _lineItemId: string,
-  _resolution: DisputeResolution,
-  _opts?: ResolutionOptions,
+export async function resolveDispute(
+  lineItemId: string,
+  resolution: DisputeResolution,
+  opts: ResolutionOptions = {},
 ): Promise<ClaimView> {
-  throw new Error("resolveDispute() not implemented");
+  const ctx = await loadLineContext(lineItemId);
+  const dispute = await prisma.dispute.findUnique({ where: { lineItemId } });
+  if (!dispute || dispute.status !== "open") {
+    throw new Error(`no open dispute for line ${lineItemId}`);
+  }
+
+  await prisma.$transaction(
+    async (tx) => {
+      // Same serialization point as adjudication: lock the member row first.
+      await tx.member.update({
+        where: { id: ctx.claim.memberId },
+        data: { version: { increment: 1 } },
+      });
+
+      let toState: string;
+      if (resolution === "uphold") {
+        // Trivial case: restore the pre-dispute outcome, no ledger change.
+        toState = dispute.fromStatus;
+        await tx.lineItem.update({
+          where: { id: lineItemId },
+          data: { status: dispute.fromStatus },
+        });
+      } else {
+        toState = await rerunLineInTx(tx, ctx, opts.overrides);
+      }
+
+      await tx.dispute.update({
+        where: { lineItemId },
+        data: {
+          status: "resolved",
+          resolution,
+          ...(opts.overrides && { overrides: JSON.stringify(opts.overrides) }),
+          ...(opts.note !== undefined && { note: opts.note }),
+        },
+      });
+      await tx.event.create({
+        data: {
+          claimId: ctx.claim.id,
+          lineItemId,
+          type: "RESOLVED",
+          fromState: "disputed",
+          toState,
+          actor: "reviewer",
+          ...(opts.note !== undefined && { note: opts.note }),
+          ...(opts.overrides && { overridesApplied: JSON.stringify(opts.overrides) }),
+        },
+      });
+    },
+    { maxWait: 10_000, timeout: 20_000 },
+  );
+
+  return (await getClaim(ctx.claim.id))!;
 }
 
 /** Reviewer resolves a pended (manual-review) line: `approve` (run engine) or `deny`. */

@@ -131,9 +131,11 @@ model LineItem {
   memberCostShareCents      Int?
   reasons                   String? // JSON-serialized Reason[]
 
-  accumulatorEntry AccumulatorEntry?
-  dispute          Dispute?
-  events           Event[]
+  // 0..* over the line's life: at most one ACTIVE entry, plus voided ones kept
+  // for audit after a dispute reversal (§6). "1:1" in the doc means one *active*.
+  accumulatorEntries AccumulatorEntry[]
+  dispute            Dispute?
+  events             Event[]
 
   @@index([claimId])
 }
@@ -141,7 +143,7 @@ model LineItem {
 /// The accumulator LEDGER: one row per finalized line. Usage = Σ active rows.
 model AccumulatorEntry {
   id         String   @id @default(uuid())
-  lineItemId String   @unique
+  lineItemId String // NOT unique: a line may have a voided entry + a fresh one (§6)
   lineItem   LineItem @relation(fields: [lineItemId], references: [id], onDelete: Cascade)
   memberId   String
   member     Member   @relation(fields: [memberId], references: [id])
@@ -155,6 +157,7 @@ model AccumulatorEntry {
   createdAt DateTime @default(now())
 
   @@index([memberId, planYear, serviceType, voided])
+  @@index([lineItemId, voided])
 }
 
 /// 0..1 per line. A member contests a resolved-but-not-yet-paid line (§6).
@@ -164,6 +167,7 @@ model Dispute {
   lineItem   LineItem @relation(fields: [lineItemId], references: [id], onDelete: Cascade)
 
   reason     String
+  fromStatus String // the line's decided status before the dispute (restored on uphold)
   status     String    @default("open") // open -> resolved
   resolution String? // uphold | overturn
   overrides  String? // JSON-serialized Override[]
