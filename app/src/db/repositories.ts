@@ -15,6 +15,9 @@ import { prisma } from "./client.js";
 export type PlanWithRules = Prisma.PlanGetPayload<{ include: { coverageRules: true } }>;
 export type ClaimWithLines = Prisma.ClaimGetPayload<{ include: { lineItems: true } }>;
 
+/** Either the base client or an interactive-transaction client. */
+export type DbClient = Prisma.TransactionClient;
+
 // ── Reference data (seeded, not API-managed) ───────────────────────────────
 
 export interface RuleInput {
@@ -128,15 +131,18 @@ export interface AccumulatorSums {
   benefitUsedByServiceType: Record<string, number>;
 }
 
-export function writeAccumulatorEntry(data: {
-  lineItemId: string;
-  memberId: string;
-  planYear: number;
-  serviceType: string;
-  deductibleDeltaCents: number;
-  benefitDeltaCents: number;
-}): Promise<AccumulatorEntry> {
-  return prisma.accumulatorEntry.create({ data });
+export function writeAccumulatorEntry(
+  data: {
+    lineItemId: string;
+    memberId: string;
+    planYear: number;
+    serviceType: string;
+    deductibleDeltaCents: number;
+    benefitDeltaCents: number;
+  },
+  db: DbClient = prisma,
+): Promise<AccumulatorEntry> {
+  return db.accumulatorEntry.create({ data });
 }
 
 /** Void the ledger entry for a line (dispute/resolution reversal, §6). */
@@ -155,8 +161,9 @@ export async function voidAccumulatorEntryForLine(lineItemId: string): Promise<v
 export async function loadAccumulators(
   memberId: string,
   planYear: number,
+  db: DbClient = prisma,
 ): Promise<AccumulatorSums> {
-  const grouped = await prisma.accumulatorEntry.groupBy({
+  const grouped = await db.accumulatorEntry.groupBy({
     by: ["serviceType"],
     where: { memberId, planYear, voided: false },
     _sum: { deductibleDeltaCents: true, benefitDeltaCents: true },

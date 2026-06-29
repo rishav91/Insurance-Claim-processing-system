@@ -26,6 +26,12 @@ model Member {
   name        String // PHI
   dateOfBirth String // PHI, ISO date
 
+  // Serialization token: adjudication bumps this inside its transaction to take a
+  // write lock on the member row BEFORE summing the ledger (§ concurrency). On
+  // SQLite the single-writer connection makes the sum→decide→insert atomic; the
+  // Postgres equivalent is SELECT … FOR UPDATE on this row.
+  version Int @default(0)
+
   policies           Policy[]
   claims             Claim[]
   accumulatorEntries AccumulatorEntry[]
