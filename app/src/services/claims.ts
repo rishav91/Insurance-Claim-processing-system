@@ -454,9 +454,15 @@ export async function listClaims(memberId: string): Promise<ClaimSummary[]> {
   }));
 }
 
-export async function getDispute(disputeId: string): Promise<DisputeView | null> {
-  const d = await prisma.dispute.findUnique({ where: { id: disputeId } });
-  if (!d) return null;
+function toDisputeView(d: {
+  id: string;
+  lineItemId: string;
+  status: string;
+  reason: string;
+  resolution: string | null;
+  overrides: string | null;
+  note: string | null;
+}): DisputeView {
   return {
     id: d.id,
     lineItemId: d.lineItemId,
@@ -466,6 +472,16 @@ export async function getDispute(disputeId: string): Promise<DisputeView | null>
     overrides: d.overrides ? (JSON.parse(d.overrides) as Override[]) : null,
     note: d.note,
   };
+}
+
+export async function getDispute(disputeId: string): Promise<DisputeView | null> {
+  const d = await prisma.dispute.findUnique({ where: { id: disputeId } });
+  return d ? toDisputeView(d) : null;
+}
+
+export async function getDisputeByLine(lineItemId: string): Promise<DisputeView | null> {
+  const d = await prisma.dispute.findUnique({ where: { lineItemId } });
+  return d ? toDisputeView(d) : null;
 }
 
 export async function getMemberAccumulators(
