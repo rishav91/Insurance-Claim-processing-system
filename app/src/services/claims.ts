@@ -361,6 +361,55 @@ export interface ResolutionOptions {
   note?: string;
 }
 
+/** Summary row for the member's claim list (api.md endpoint 4). */
+export interface ClaimSummary {
+  id: string;
+  status: ClaimStatus;
+  submittedAt: Date;
+  lineCount: number;
+  totalPayableCents: number;
+}
+
+/** Dispute read model (api.md endpoint 7). */
+export interface DisputeView {
+  id: string;
+  lineItemId: string;
+  status: string;
+  reason: string;
+  resolution: string | null;
+  overrides: Override[] | null;
+  note: string | null;
+}
+
+/** Live accumulator snapshot for a member + plan year (api.md endpoint 10). */
+export interface MemberAccumulatorsView {
+  memberId: string;
+  planYear: number;
+  deductibleAnnualCents: number;
+  deductibleMetCents: number;
+  benefitUsedByServiceType: Record<string, number>;
+  limitsByServiceType: Record<string, number>;
+}
+
+export function payClaim(_claimId: string): Promise<ClaimView> {
+  throw new Error("payClaim() not implemented");
+}
+
+export function listClaims(_memberId: string): Promise<ClaimSummary[]> {
+  throw new Error("listClaims() not implemented");
+}
+
+export function getDispute(_disputeId: string): Promise<DisputeView | null> {
+  throw new Error("getDispute() not implemented");
+}
+
+export function getMemberAccumulators(
+  _memberId: string,
+  _planYear: number,
+): Promise<MemberAccumulatorsView> {
+  throw new Error("getMemberAccumulators() not implemented");
+}
+
 /** Decided, pre-payment line states that may be disputed (§4). */
 const DISPUTABLE: ReadonlySet<string> = new Set([
   "approved",
