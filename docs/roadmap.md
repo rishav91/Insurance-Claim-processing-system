@@ -43,20 +43,24 @@ The graded heart of the system. No I/O.
 
 ---
 
-## Phase 2 — Persistence (Prisma + SQLite) 🔜
+## Phase 2 — Persistence (Prisma + SQLite) ✅ (38 specs, tsc clean)
 Make the entities durable; the schema doubles as living domain-model docs.
-- ⬜ Prisma schema: `Plan`, `CoverageRule` (FK→Plan), `Policy` (Member↔Plan +
+- ✅ Prisma schema: `Plan`, `CoverageRule` (FK→Plan), `Policy` (Member↔Plan +
   effective window), `Member`, `Provider`, `Claim` (+ `paidAmountCents`/`paidAt`),
-  `LineItem`, `AccumulatorEntry` (ledger), `Dispute`, `Event` (+ status/reason enums).
-- ⬜ Money stored as integer cents. Usage is the **sum of active `AccumulatorEntry`
-  rows**, not a stored total; index `(memberId, planYear, serviceType, voided)`.
-- ⬜ Migration + a thin repository layer (or Prisma client directly) behind
-  small typed functions.
-- **Tests:** a repository round-trip (create plan+rules+policy → read back) and a
-  ledger-sum read (`benefitUsed` = Σ active entries).
-- **Risk/decision:** keep repositories thin; no generic DAL abstraction.
+  `LineItem`, `AccumulatorEntry` (ledger), `Dispute`, `Event`. Statuses are
+  `String`s constrained by the TS unions (SQLite has no native enums); **`Claim`
+  has no status column — it is derived from its lines (§4)**.
+- ✅ Money stored as integer cents. Usage is the **sum of active `AccumulatorEntry`
+  rows** (`loadAccumulators` groups on read), not a stored total; index
+  `(memberId, planYear, serviceType, voided)`.
+- ✅ Thin repository layer (`src/db/repositories.ts`) behind small typed
+  functions — no generic DAL abstraction.
+- ✅ **Tests:** repository round-trip (create plan+rules+policy → read back) and a
+  ledger-sum read (`benefitUsed` = Σ active entries, voided excluded, per plan year).
+- Test harness: vitest `globalSetup` pushes a fresh SQLite schema; single fork so
+  the single-writer ledger invariant is exercised, not masked.
 
-## Phase 3 — Orchestration service ⬜
+## Phase 3 — Orchestration service 🔜
 Wire the pure engine to the database. This is where the "gather facts" work lives.
 - ⬜ `submitClaim(input)` → persist claim + lines as `submitted`, append a
   `SUBMITTED` event. No adjudication yet (two-step decision, decisions.md §4).
