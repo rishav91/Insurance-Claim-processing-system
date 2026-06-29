@@ -1,0 +1,188 @@
+// Prisma schema — the durable shape of the domain (domain-model.md §2).
+// SQLite for zero-infra local persistence; the typed models double as schema docs.
+//
+// Modeling notes carried from the domain doc:
+//  - Money is INTEGER CENTS everywhere (Int), never floats.
+//  - Claim status is NOT stored — it is DERIVED from its line items at read time
+//    (deriveClaimStatus, §4), which makes inconsistent claim states unrepresentable.
+//    LineItem.status IS stored (it is real per-line state).
+//  - Accumulators are a LEDGER: usage = SUM of active (non-voided) AccumulatorEntry
+//    rows, not a mutated total (§ ledger). Dispute reversal = void the entry.
+//  - SQLite has no native enums; status/type/actor/reason are Strings constrained by
+//    the TypeScript union types in src/domain/types.ts.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// A member (the patient). PHI lives here, never in the engine.
+model Member {
+  id          String @id @default(uuid())
+  name        String // PHI
+  dateOfBirth String // PHI, ISO date
+
+  policies           Policy[]
+  claims             Claim[]
+  accumulatorEntries AccumulatorEntry[]
+
+  createdAt DateTime @default(now())
+}
+
+/// The reusable benefit DESIGN (coverage rules + deductible). Shared across members.
+model Plan {
+  id                    String @id @default(uuid())
+  name                  String
+  planYear              Int // calendar-year accumulator period
+  deductibleAnnualCents Int
+
+  coverageRules CoverageRule[]
+  policies      Policy[]
+
+  createdAt DateTime @default(now())
+}
+
+/// One rule per service type per plan — DATA the engine interprets (§2).
+model CoverageRule {
+  id     String @id @default(uuid())
+  planId String
+  plan   Plan   @relation(fields: [planId], references: [id], onDelete: Cascade)
+
+  serviceType          String
+  excluded             Boolean @default(false)
+  allowedAmountCents   Int? // optional fee schedule
+  copayCents           Int? // at most ONE of copay / coinsurance
+  coinsuranceRate      Float? // 0..1
+  annualLimitCents     Int? // max insurer-paid cents / plan year
+  requiresManualReview Boolean @default(false)
+
+  @@unique([planId, serviceType])
+}
+
+/// A member's ENROLLMENT in a Plan over an effective window (§2).
+model Policy {
+  id       String @id @default(uuid())
+  memberId String
+  member   Member @relation(fields: [memberId], references: [id])
+  planId   String
+  plan     Plan   @relation(fields: [planId], references: [id])
+
+  effectiveFrom String // ISO date — drives the active-on-serviceDate check
+  effectiveTo   String // ISO date
+
+  createdAt DateTime @default(now())
+
+  @@index([memberId])
+}
+
+/// A label on the claim (network rate negotiation is out of scope, §2).
+model Provider {
+  id     String  @id @default(uuid())
+  name   String
+  claims Claim[]
+}
+
+/// A claim. NOTE: no `status` column — claim status is derived from its lines (§4).
+model Claim {
+  id         String @id @default(uuid())
+  memberId   String
+  member     Member @relation(fields: [memberId], references: [id])
+  providerId String
+  provider   Provider @relation(fields: [providerId], references: [id])
+
+  submittedAt     DateTime  @default(now())
+  paidAmountCents Int? // Σ payable of paid lines, set once at disbursement
+  paidAt          DateTime?
+
+  lineItems LineItem[]
+  events    Event[]
+
+  @@index([memberId])
+}
+
+/// A claim line + its embedded adjudication result. Status IS stored (real state).
+model LineItem {
+  id      String @id @default(uuid())
+  claimId String
+  claim   Claim  @relation(fields: [claimId], references: [id], onDelete: Cascade)
+
+  serviceType       String
+  serviceDate       String // ISO date — drives eligibility + duplicate detection
+  diagnosisCode     String? // PHI; stored, not adjudicated on
+  billedAmountCents Int
+
+  status String @default("submitted") // per-line state machine (§4)
+
+  // Embedded Adjudication result (§5) — null until adjudicated.
+  allowedCents              Int?
+  payableCents              Int?
+  memberResponsibilityCents Int?
+  deductibleAppliedCents    Int?
+  memberCostShareCents      Int?
+  reasons                   String? // JSON-serialized Reason[]
+
+  accumulatorEntry AccumulatorEntry?
+  dispute          Dispute?
+  events           Event[]
+
+  @@index([claimId])
+}
+
+/// The accumulator LEDGER: one row per finalized line. Usage = Σ active rows.
+model AccumulatorEntry {
+  id         String   @id @default(uuid())
+  lineItemId String   @unique
+  lineItem   LineItem @relation(fields: [lineItemId], references: [id], onDelete: Cascade)
+  memberId   String
+  member     Member   @relation(fields: [memberId], references: [id])
+
+  planYear             Int // calendarYear(line.serviceDate)
+  serviceType          String
+  deductibleDeltaCents Int
+  benefitDeltaCents    Int // insurer-paid cents — counts against the annual limit
+  voided               Boolean @default(false) // voided rows don't count
+
+  createdAt DateTime @default(now())
+
+  @@index([memberId, planYear, serviceType, voided])
+}
+
+/// 0..1 per line. A member contests a resolved-but-not-yet-paid line (§6).
+model Dispute {
+  id         String   @id @default(uuid())
+  lineItemId String   @unique
+  lineItem   LineItem @relation(fields: [lineItemId], references: [id], onDelete: Cascade)
+
+  reason     String
+  status     String    @default("open") // open -> resolved
+  resolution String? // uphold | overturn
+  overrides  String? // JSON-serialized Override[]
+  note       String?
+
+  createdAt  DateTime  @default(now())
+  resolvedAt DateTime?
+}
+
+/// Append-only lifecycle / audit log — one row per state transition (§2).
+model Event {
+  id         String    @id @default(uuid())
+  claimId    String
+  claim      Claim     @relation(fields: [claimId], references: [id], onDelete: Cascade)
+  lineItemId String?
+  lineItem   LineItem? @relation(fields: [lineItemId], references: [id])
+
+  type             String // SUBMITTED, ADJUDICATED, PENDED, DISPUTED, RESOLVED, PAID
+  fromState        String?
+  toState          String?
+  actor            String // member | system | reviewer
+  note             String?
+  overridesApplied String? // JSON-serialized Override[]
+
+  createdAt DateTime @default(now())
+
+  @@index([claimId])
+}
