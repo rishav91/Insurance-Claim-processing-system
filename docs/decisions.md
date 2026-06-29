@@ -1,0 +1,139 @@
+# Decisions & Trade-offs
+
+> What I built, what I deliberately didn't, and the assumptions behind each. The
+> "why" matters more than the "what" — every cut below is a choice with a reason,
+> not an oversight. Entities/state machines live in `domain-model.md`; domain
+> vocabulary in `domain-research.md`.
+
+## 1. How I approached it
+
+I treated **domain research as part of the work, not a preamble**: I wrote
+`domain-research.md` first, then designed the model against it, then ran the design
+through a structured self-interrogation (scope grilling) and a critical subagent
+review before writing any code. The model doc carries the scars of that process —
+several sections exist specifically because the review or the grilling found a hole.
+
+The guiding principle for scope: **three flows done well beats ten done poorly.** The
+three are *submit → adjudicate → dispute*, plus the manual-review path the prompt
+explicitly names.
+
+## 2. Stack & interface
+
+| Decision | Choice | Why |
+|---|---|---|
+| Language/runtime | **TypeScript / Node** | Daily-driver stack → time goes to the domain, not the tooling. |
+| Interface | **REST API** | Evaluators can `curl` the flows; demonstrates lifecycle + disputes better than a CLI. |
+| Persistence | **SQLite via Prisma** | Typed models double as schema docs; zero infra. Also gives a concrete single-writer concurrency story (see §5). |
+| Tests | **Vitest, behavior-first** | Specs encode domain rules (`domain-model.md` §7), written before/with code so git history shows TDD. |
+
+Persistence is real (not in-memory) specifically so the **accumulator** — the
+stateful heart of the domain — is exercised across requests, not faked.
+
+## 3. The decisions that define the domain model
+
+These are the choices a reviewer should interrogate me on.
+
+### Coverage rules are **data interpreted by an engine**, not code
+A `CoverageRule` is a row (`serviceType`, `excluded`, fee schedule, copay/coinsurance,
+annual limit, review flag). A new benefit is a row, not a deploy. This is the
+centerpiece — it keeps policy *data* separate from adjudication *logic*. The
+alternative (rules as code/DSL) was rejected as over-engineering for the scope; a
+data table covers every rule we need and stays testable.
+
+### Adjudication is **per line item**; claim status is **derived**
+`deriveClaimStatus(lineStates[])` is a total pure function (precedence table in
+`domain-model.md` §4). Claim status is never set directly, so partial approvals fall
+out naturally and inconsistent states are unrepresentable. This directly answers the
+prompt's "5 line items, 3 covered, 1 denied, 1 review" question.
+
+### `partially_approved` is reserved **only** for annual-limit overflow
+A line where the member owes a deductible/copay is still **`approved`** — cost-sharing
+is not partial approval. `partially_approved` means exactly one thing: the line was
+paid up to the remaining limit and the excess denied. Keeping the status meaningful
+was a deliberate modeling choice that the subagent review confirmed avoids confusion.
+
+### One engine, one resolution path
+Submission, manual-review resolution, and dispute overturn all flow through the same
+`adjudicateLine` function and the same reverse-then-reapply reconciliation routine
+(`domain-model.md` §6). Single source of truth for money math and accumulator
+bookkeeping; no parallel code paths to drift apart.
+
+### Explanations are a **byproduct of execution**
+Each pipeline step emits its reason as a side effect, so the ordered `reasons[]` can
+never disagree with what the engine actually did. I chose this over a full rule-trace
+(every pass/no-op step) because the "explain WHY it was denied/reduced" signal is fully
+served by the money-affecting steps; the trace is a cheap later add (architecture is
+ready for it).
+
+### The adjudication engine takes **no PHI**
+`adjudicateLine` receives only `serviceType`, dates, amounts, and accumulators — never
+`name`, `dateOfBirth`, or `diagnosisCode`. So the entire rules engine, its logs, and
+its explanations are PHI-free by construction. This was the cheapest high-signal way to
+honor the prompt's "sensitive health data" framing without building access control.
+
+## 4. Assumptions about the domain
+
+Where the prompt is silent, I made a call and recorded it:
+
+| Topic | Assumption | Rationale |
+|---|---|---|
+| **Limit overflow** | Pay up to the remaining limit, deny the excess → `partially_approved`. | Prompt is silent; this matches how real benefit maximums behave and best showcases partial approval. |
+| **Plan year** | Governed by **date of service**, not submission date. | Standard insurance behavior; keeps eligibility and accumulators on one clock. A Dec-2025 service submitted Jan-2026 counts against 2025. |
+| **Cost-share "neither"** | A rule with neither copay nor coinsurance = `coinsurance 0` → 100% coverage after deductible. | Preventive-care benefits are real and need a defined meaning; "neither" shouldn't be undefined. |
+| **`serviceType` ownership** | A **payer-controlled benefit category**, validated against the policy; not a trusted member assertion. | Mirrors reality (payer maps procedure codes → categories) while staying simple. |
+| **Limit-exhausted vs hard denial** | A limit-exhausted line still applies its **deductible** delta; a hard denial (excluded/duplicate/invalid) touches **no** money or accumulators. | A limit-hit service is still *covered* — the member's deductible-eligible spend is real. A not-covered service never enters the money model. |
+| **Duplicate** | Same `(member, serviceType, serviceDate, provider)` against any prior **non-denied** line. | Simple, deterministic, catches the realistic resubmission case. |
+| **Allowed amount** | `min(billed, feeSchedule)` if the rule has a schedule, else `billed`. | Preserves the `billed ≠ allowed` distinction cheaply without modeling provider contracts. |
+| **Reference data** | Members, policies, providers are **seeded**, not managed via the API. | The prompt lists account/policy management as out of scope. |
+| **Money** | Integer **cents** everywhere; all arithmetic clamps to ≥ 0. | Avoids float drift; clamping prevents negative payable (copay > allowed, etc.). |
+
+## 5. Concurrency
+
+I did **not** assume "single-threaded and hope." Two claims for the same member
+adjudicated concurrently both read-modify-write the same accumulator row and would lose
+updates / overspend a limit. Decision: **the accumulator row is the serialization
+point** — a claim is adjudicated inside one transaction that locks/version-checks that
+row. SQLite's single-writer model makes this concrete locally; the Postgres equivalent
+is `SELECT … FOR UPDATE`. Stated as an invariant with a test, not left to chance.
+
+## 6. What I deliberately did NOT build (calibrated cuts)
+
+Each of these is a conscious trade-off; none is an accident.
+
+| Cut | Why it's safe to cut | What it would take to add |
+|---|---|---|
+| **OOP maximum** | One more accumulator dimension; the deductible + per-service limit already demonstrate "track usage against limits." | One running total + one pipeline step. |
+| **Visit / frequency limits** | Same *shape* as the dollar limit (count vs cents); adds surface without new insight. | A count-based accumulator + step. |
+| **Waiting periods, pre-authorization** | Adjacent benefit rules; don't add modeling depth beyond what eligibility/exclusion already show. | Extra rule fields + pipeline gates. |
+| **In/out-of-network rate negotiation** | Would turn `provider` into a rate source; the fee schedule already gives `billed ≠ allowed`. | Provider-contract entity + network status input. |
+| **Medical-necessity / real ICD-CPT code sets** | Requires code databases and crosswalks; not the modeling signal being tested. | Code tables + `procedureCode → serviceType` crosswalk + necessity rules. |
+| **`procedureCode → serviceType` crosswalk** | Collapsed to a direct, validated `serviceType` field. | A lookup table + validation. |
+| **`deductibleExempt` (first-dollar coverage)** | Preventive 100%-no-deductible is a flag away; the "neither = 0%" rule covers full coverage *after* deductible. | One boolean on the rule + a skip in step 7. |
+| **Timely-filing limits** | Rejecting late-filed claims is a date check unrelated to adjudication depth. | A submission-date vs service-date guard. |
+| **Disputes on `paid` lines** | Clawback / supplemental payment needs a money-ledger we don't model; disputes target denials/partials (all pre-payment), so the common case is covered. | A disbursement ledger + adjustment records. |
+| **Cross-claim cascade re-adjudication** | See §7 — accepted limitation, not a missing feature. | Dependency tracking across claims + re-run orchestration. |
+| **Override types beyond 3** | The full taxonomy is *defined* in the model; `WAIVE_LIMIT`/`MARK_ELIGIBLE`/`WAIVE_DEDUCTIBLE` prove both shapes (boolean + parameterized). | The remaining gates follow the identical pattern. |
+| **Auth / registration / multi-tenant** | Explicitly out of scope per the prompt. | — |
+
+## 7. Known limitation I want to flag honestly
+
+**Dispute resolution is consistent for the resolved line, but not across interleaving
+claims.** Reverse-then-reapply recomputes a line's delta against the accumulator's
+*current* value, which other claims may have moved in the meantime. So an overturn can
+push `benefitUsed` past the annual cap, or a from-scratch time-ordered re-run could have
+awarded the remaining dollars to a different claim. This is **order-dependent and
+accepted**: a dispute resolves *one* line against present state; we do not cascade
+re-adjudicate other claims, and an override is an intentional exception that may exceed a
+cap. There's a behavior spec that *demonstrates* this order-dependence so it's visible in
+the test suite, not hidden. This is the honest boundary of the consistency model.
+
+## 8. If I had more time (in priority order)
+
+1. **Cross-claim re-adjudication** (or at least a flag/report when a resolution leaves
+   the accumulator inconsistent with a later claim).
+2. **OOP maximum** as a second accumulator dimension — cheap, strengthens the
+   "multiple interacting accumulators" story.
+3. **Full rule trace** alongside `reasons[]` for audit (the architecture already
+   supports it).
+4. The remaining **override types** + a `procedureCode → serviceType` crosswalk.
+5. An **audit log** of who-viewed/changed PHI to round out the sensitive-data story.
