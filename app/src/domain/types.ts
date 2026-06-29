@@ -45,6 +45,40 @@ export interface CoverageRule {
   requiresManualReview?: boolean;
 }
 
+/** PHI-free inputs the engine adjudicates on. */
+export interface LineInput {
+  serviceType: ServiceType;
+  serviceDate: string; // ISO date — used upstream for plan-year + eligibility
+  billedAmountCents: Cents;
+}
+
+/** Accumulator state for one (member, planYear, serviceType), read by the engine. */
+export interface AccumulatorSnapshot {
+  deductibleMetCents: Cents;
+  deductibleAnnualCents: Cents;
+  /** Insurer-paid cents so far this plan year for this service type. */
+  benefitUsedCents: Cents;
+}
+
+/** Line-item lifecycle states (domain-model.md §4). */
+export type LineStatus =
+  | "submitted"
+  | "approved"
+  | "partially_approved"
+  | "denied"
+  | "pended"
+  | "disputed"
+  | "paid";
+
+/** Derived claim lifecycle states (domain-model.md §4). */
+export type ClaimStatus =
+  | "submitted"
+  | "under_review"
+  | "approved"
+  | "partially_approved"
+  | "denied"
+  | "paid";
+
 /** Reviewer override directives (domain-model.md §5 taxonomy). */
 export type Override =
   | { type: "FORCE_COVERED" }
