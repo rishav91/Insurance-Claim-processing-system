@@ -8,8 +8,9 @@
 
 Three flows, built well:
 
-1. **Submit a claim** with N line items (members/policies/providers are seeded
-   reference data — not managed through the API).
+1. **Submit a claim** with N line items (plans+rules, policies, members,
+   providers are seeded reference data — not managed through the API), then
+   **adjudicate** it (a two-step flow: submit → adjudicate).
 2. **Adjudicate** each line item through a deterministic pipeline → produce a
    decision, a payable amount, and a structured explanation; roll the claim
    status up from its lines.
@@ -32,17 +33,25 @@ appeals, cascading re-adjudication across claims.
 ## 2. Entities & relationships
 
 ```
-Member 1───* Claim *───1 Provider
-  │             │
-  │ 1           │ 1
-  │             *
-  *          LineItem ──1── Adjudication (embedded result)
-Policy 1──* CoverageRule        │ 0..1
-  │                          Dispute
-  │ 1
-  *
-Accumulator  (per member, per plan year)
+Plan 1──* CoverageRule          Member 1───* Claim *───1 Provider
+  │                                │            │
+  │ 1  (benefit design)           │ 1          │ 1
+  *                               │            *
+Policy *──1 Member  (enrollment)  │         LineItem ──1── Adjudication (embedded)
+                                  │            │ 0..1   │ 1
+                                  │         Dispute      *
+                                  *                   AccumulatorEntry (ledger)
+                              (Claim/Line)Event           per finalized line
+                               append-only audit log
 ```
+
+Two things changed from the first draft, after a domain pass:
+- **Plan vs Policy** are split. A **Plan** is the reusable *benefit design* (the
+  coverage rules + deductible/limits); a **Policy** is a member's *enrollment* in a
+  Plan over an effective window. Coverage rules belong to the Plan, not the member.
+- **Accumulators are a ledger**: each finalized line writes an `AccumulatorEntry`;
+  "used so far" is the **sum of active (non-voided) entries**, not a mutated total.
+  A dispute reversal *voids* an entry rather than doing reverse arithmetic.
 
 ### Member
 | Field | Notes |
@@ -50,16 +59,26 @@ Accumulator  (per member, per plan year)
 | id | |
 | name | **PHI** |
 | dateOfBirth | **PHI** |
-| policyId | FK → Policy |
 
-### Policy
+> One member per policy is assumed — no subscriber/dependent distinction, no
+> group/employer sponsor. Both are named cuts (`decisions.md`).
+
+### Plan — *the reusable benefit design*
 | Field | Notes |
 |---|---|
 | id | |
-| planYear | the accumulator period. Plan year = **calendar year of the line's `serviceDate`** (see "Plan year" note below), not submission year |
-| deductibleAnnualCents | member-level annual deductible |
-| coverageRules | 1..* CoverageRule |
-| effectiveFrom / effectiveTo | eligibility window |
+| name | e.g. "Gold PPO 2026" |
+| planYear | the accumulator period (calendar year — see "Plan year" note below) |
+| deductibleAnnualCents | annual deductible for this design |
+| coverageRules | 1..* CoverageRule — **owned by the Plan**, shared across all enrolled members |
+
+### Policy — *a member's enrollment in a Plan*
+| Field | Notes |
+|---|---|
+| id | |
+| memberId | FK → Member |
+| planId | FK → Plan |
+| effectiveFrom / effectiveTo | eligibility window (drives the active-on-serviceDate check) |
 
 > **Plan year is governed by the date of service, not the submission date.** A
 > service rendered Dec 2025 but submitted Jan 2026 counts against the **2025**
@@ -71,8 +90,10 @@ Accumulator  (per member, per plan year)
 > **Timely-filing limits** (rejecting claims filed too long after service) are a named cut.
 
 ### CoverageRule — *the centerpiece; data, interpreted by the engine*
+*Belongs to a Plan.* One rule per service type per plan.
 | Field | Meaning |
 |---|---|
+| planId | FK → Plan |
 | serviceType | benefit category the line is matched on (e.g. `OFFICE_VISIT`, `PT`, `SURGERY`) |
 | excluded | if true, the service is never covered |
 | allowedAmountCents? | optional fee schedule; `allowed = min(billed, scheduled)`, else `billed` |
@@ -92,7 +113,7 @@ Accumulator  (per member, per plan year)
 > assertion. In reality the provider submits a procedure code (CPT) and the payer maps
 > `procedureCode → serviceType` via a crosswalk. We collapse that to a direct `serviceType`
 > field on the line as a deliberate simplification, but it is **validated** against the
-> policy's known service types — an unknown type fails step 1 (`INVALID_LINE`), never
+> plan's known service types — an unknown type fails step 1 (`INVALID_LINE`), never
 > trusted blindly. Adding the code crosswalk is a clean stretch (named in `decisions.md`).
 
 ### Provider
@@ -106,7 +127,13 @@ label on the claim, not an adjudication input (one named cut).
 | memberId, providerId | FKs |
 | status | **derived** from line items (see §4) |
 | submittedAt | |
+| paidAmountCents? | set at disbursement (Σ payable of paid lines); null until paid |
+| paidAt? | disbursement timestamp; null until paid |
 | lineItems | 1..* |
+
+> Payment is modelled as **fields on the claim**, not a separate `Payment` entity.
+> Since `paid` is terminal and clawback is a cut, fields suffice; a disbursement
+> ledger would only be needed to support post-payment adjustments.
 
 ### LineItem
 | Field | Notes |
@@ -122,26 +149,63 @@ label on the claim, not an adjudication input (one named cut).
 ### Adjudication (embedded in LineItem)
 The money breakdown + ordered reasons. See §5.
 
-### Accumulator — *the "track usage against limits" model*
-One row per `(memberId, planYear)`, where `planYear = calendarYear(line.serviceDate)`:
+### AccumulatorEntry — *the "track usage against limits" model, as a ledger*
+One row **per finalized line item** (not per member). "Used so far" is a **query**,
+not a stored total:
 | Field | Notes |
 |---|---|
-| deductibleMetCents | running total applied to the annual deductible |
-| benefitUsedByServiceType | map `serviceType → insurer-paid cents this year` |
-| version | optimistic-lock token for concurrency (see invariant below) |
+| id | |
+| lineItemId | the line that produced this entry (1:1) |
+| memberId | whose usage this counts against |
+| planYear | `calendarYear(line.serviceDate)` |
+| serviceType | for per-service benefit limits |
+| deductibleDeltaCents | this line's contribution to the deductible |
+| benefitDeltaCents | insurer-paid cents (counts against the annual limit) |
+| voided | true once a dispute reverses this line; voided entries don't count |
 
-Adjudication **reads** accumulators to decide, and **writes** a delta when a line
-is finalized. Disputes/overturns **reverse then reapply** deltas (§6).
+Derived reads the engine consumes as its `AccumulatorSnapshot`:
+```
+deductibleMet(member, year)        = Σ deductibleDeltaCents  WHERE !voided
+benefitUsed(member, year, service) = Σ benefitDeltaCents     WHERE !voided
+```
 
-> **Concurrency invariant — accumulator updates serialize per member.** Two claims for
-> the same member adjudicated concurrently both read-modify-write the same accumulator
-> row; without serialization they lose updates and overspend a limit (the cross-request
-> twin of the intra-claim fold bug). Rule: a claim is adjudicated inside **one
-> transaction** that takes the accumulator row as its serialization point —
-> read-modify-write with a `version` check (optimistic) or row lock (pessimistic).
-> Locally, **SQLite's single-writer model makes this concrete** (writes serialize at the
-> DB); on Postgres this is `SELECT … FOR UPDATE` on the accumulator row. Stated as an
-> invariant, not relied on by accident.
+Why a ledger over a mutable total:
+- **Dispute reversal = void the line's entry** (then re-adjudicate writes a fresh
+  one), instead of reverse-then-reapply arithmetic that can drift.
+- Every limit-affecting decision is **auditable** — you can see which line consumed
+  what, which directly supports the explanation + retroactive-change signals.
+- Cost: usage is a `SUM` on read (cheap at this scale; index on
+  `(memberId, planYear, serviceType, voided)`), and the intra-claim fold (§5) sums
+  the prior lines' *in-flight* deltas on top of the persisted sum.
+
+> **Concurrency invariant — usage updates serialize per member.** Two claims for the
+> same member adjudicated concurrently could each read the same ledger sum and both
+> approve against the full remaining limit (the cross-request twin of the intra-claim
+> fold bug). Rule: a claim is adjudicated inside **one transaction** that serializes on
+> the member's usage — e.g. a row lock on the `Policy`/member row taken before summing
+> the ledger, so the sum→decide→insert sequence is atomic. Locally, **SQLite's
+> single-writer model makes this concrete**; on Postgres it's `SELECT … FOR UPDATE` on
+> the member/policy row. Stated as an invariant, not relied on by accident.
+
+### Event — *append-only lifecycle / audit log*
+One row per state transition, never updated or deleted:
+| Field | Notes |
+|---|---|
+| id | |
+| claimId | FK → Claim |
+| lineItemId? | set for line-level events (adjudicated, pended, disputed, resolved) |
+| type | `SUBMITTED`, `ADJUDICATED`, `PENDED`, `DISPUTED`, `RESOLVED`, `PAID` |
+| fromState / toState | the transition |
+| actor | `member`, `system`, or `reviewer` (no auth — a label, see cut below) |
+| note | reviewer note / dispute reason |
+| overridesApplied? | override directives used on a resolution |
+| createdAt | |
+
+> The event log makes the **state machine observable** (a claim's full timeline is
+> queryable, not just its latest state), gives disputes/overturns a **retroactive-change
+> audit trail**, and is the backbone of a real PHI access/change audit. `actor` is a
+> plain label because auth is out of scope — wiring it to a real identity is the
+> extension.
 
 ### Dispute (0..1 per LineItem)
 | Field | Notes |
@@ -289,12 +353,18 @@ snapshot that already includes the deltas of lines 1..N-1 *within the same claim
 
 ```
 adjudicateClaim(claim):
-  acc = load running accumulators for (member, planYear)   // includes all prior claims
+  lock member/policy row                                   // serialization point (§ ledger)
+  acc = sum active AccumulatorEntry rows for (member, planYear)  // all prior claims
   for line in sortBy(claim.lines, serviceDate, id):        // deterministic
       result = adjudicateLine(line, rule(line), snapshot(acc), overrides)
-      acc   += result.accumulatorDelta                     // fold forward
-  persist acc and all line results atomically
+      acc   += result.accumulatorDelta                     // fold forward (in-flight)
+  persist: one AccumulatorEntry per finalized line + line results, atomically
 ```
+
+The in-memory `acc` fold is unchanged by the ledger model — the engine still reads a
+snapshot of totals and emits a delta. The only difference is at the boundary: the
+snapshot is **summed from the ledger** at the start, and each line's delta is
+**written as a new `AccumulatorEntry`** at the end, rather than mutating a stored total.
 
 Why this matters (the reviewer's blocker case): a claim with **two `PT` lines** each
 wanting $1500 against a `remainingLimit` of $2000. Folding means line 1 consumes
@@ -369,12 +439,17 @@ routine:
 
 ```
 resolve(lineItem, action, override?):
-  reverse  lineItem's prior accumulatorDelta   (if it had one)
-  if action == deny:        outcome = denied, payable = 0
+  lock member/policy row                       // same serialization point as submit
+  void  lineItem's prior AccumulatorEntry      (if it had one)
+  if action == deny:        outcome = denied, payable = 0   (no new entry)
   else:                     re-run adjudicateLine(line, rule, snapshot(acc), override)
-  apply    new accumulatorDelta
-  re-derive parent claim status
+                            write a fresh AccumulatorEntry for the new delta
+  re-derive parent claim status; append a RESOLVED event
 ```
+
+With the ledger, "reverse then reapply" becomes **void the old entry, write a new
+one** — no in-place arithmetic, and the voided entry stays as an audit record of what
+the decision *used to* consume.
 
 - **Pended line review** — `approve` runs the engine and applies the delta;
   `deny` finalizes with a reason.
@@ -386,14 +461,14 @@ resolve(lineItem, action, override?):
 
 ### What this guarantees — and what it does NOT (calibrated trade-off)
 
-**Guarantees:** the resolved line's own delta is internally consistent — its old
-contribution is fully removed before the new one is applied, so the line never
-double-counts against itself, and the member-level accumulator total stays a sum of
-each line's *current* delta.
+**Guarantees:** the resolved line's own contribution is internally consistent — voiding
+the old `AccumulatorEntry` fully removes it before a new one is written, so the line
+never double-counts against itself, and member usage stays exactly the sum of active
+entries.
 
-**Does NOT guarantee** consistency with *other* claims adjudicated in between. Reverse-
-then-reapply recomputes against the accumulator's **current** value, which has since
-moved. Concretely:
+**Does NOT guarantee** consistency with *other* claims adjudicated in between. The
+re-run recomputes against the ledger's **current** sum, which has since moved.
+Concretely:
 
 > Claim A (PT, consumes the last $500 of a $2000 limit) → A's line denied/partial.
 > Member disputes A; meanwhile Claim B already consumed $500 of freed headroom... no —
@@ -438,12 +513,18 @@ code that satisfies it (visible in git history). Titles are the spec:
 - a paid line cannot be disputed (terminal)
 
 **Disputes / review**
-- overturning a denied line with `WAIVE_LIMIT` reverses nothing, runs the engine, and pays it
+- overturning a denied line with `WAIVE_LIMIT` voids no entry (it had none), runs the engine, and pays it
 - **overturning with `WAIVE_DEDUCTIBLE` skips the deductible step and pays more**
 - **combines two overrides in one resolution** (`{WAIVE_DEDUCTIBLE, WAIVE_LIMIT}`) and applies both
 - **rejects two conflicting `OVERRIDE_ALLOWED_AMOUNT` values**
-- resolving a pended line via `approve` applies the accumulator delta; `deny` applies none
+- resolving a pended line via `approve` writes an accumulator entry; `deny` writes none
+- **voiding then re-writing an entry leaves member usage = Σ active entries** (no drift)
 - **demonstrates order-dependence:** overturning an exhausted line with an override can push `benefitUsed` past the cap (documented limitation, §6)
+
+**Ledger & events**
+- **`benefitUsed` equals the sum of active (non-voided) `AccumulatorEntry` rows**
+- a disputed-and-overturned line's old entry is `voided` (kept for audit), a new one written
+- every transition (`SUBMITTED`, `ADJUDICATED`, `DISPUTED`, `RESOLVED`, `PAID`) appends an `Event`
 
 **Explanation**
 - a partially approved line lists both the paid portion and the `LIMIT_EXHAUSTED` excess with amounts
@@ -451,16 +532,22 @@ code that satisfies it (visible in git history). Titles are the spec:
 
 ## 8. Why this decomposition
 
+- **Plan vs Policy** — the benefit *design* (Plan + its coverage rules) is separated
+  from a member's *enrollment* (Policy). Rules are shared, not copied per member, and
+  "is this member covered" (Policy effective window) is distinct from "what does the
+  plan pay" (Plan rules).
 - **Coverage rules are data, not code.** The engine *interprets* `CoverageRule`
-  rows, so a new benefit is a row, not a deploy. Policy data and adjudication
+  rows, so a new benefit is a row, not a deploy. Plan data and adjudication
   logic stay separate.
 - **Adjudication is per line item**, claim status is **derived** — this is what
   makes partial approvals fall out naturally instead of being special-cased.
-- **Accumulators are explicit, first-class state** — the "track what's used
-  against limits" requirement lives in one place that the engine reads and writes
-  transactionally.
+- **Usage is a ledger, not a mutable counter** — `benefitUsed`/`deductibleMet` are the
+  *sum of active `AccumulatorEntry` rows*. This makes every limit decision auditable and
+  turns dispute reversal into "void an entry," not fragile reverse-then-reapply math.
 - **One engine, one resolution path** — submission, manual review, and disputes
-  all flow through the same function, so the money math and accumulator
-  bookkeeping have a single source of truth.
+  all flow through the same function, so the money math and ledger bookkeeping have a
+  single source of truth.
 - **Reasons are emitted by execution** — the explanation is a byproduct of
   adjudicating, so "why" can never disagree with "what."
+- **The event log makes lifecycle observable** — state is derivable at any point in
+  time, not just "now," which is what real claims operations and PHI audits require.

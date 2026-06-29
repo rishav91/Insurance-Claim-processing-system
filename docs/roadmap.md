@@ -45,29 +45,34 @@ The graded heart of the system. No I/O.
 
 ## Phase 2 — Persistence (Prisma + SQLite) 🔜
 Make the entities durable; the schema doubles as living domain-model docs.
-- ⬜ Prisma schema: `Member`, `Policy`, `CoverageRule`, `Provider`, `Claim`,
-  `LineItem`, `Accumulator`, `Dispute` (+ enums for statuses/reason codes).
-- ⬜ Money stored as integer cents; `Accumulator` carries a `version` column for
-  optimistic locking (concurrency invariant, decisions.md §5).
+- ⬜ Prisma schema: `Plan`, `CoverageRule` (FK→Plan), `Policy` (Member↔Plan +
+  effective window), `Member`, `Provider`, `Claim` (+ `paidAmountCents`/`paidAt`),
+  `LineItem`, `AccumulatorEntry` (ledger), `Dispute`, `Event` (+ status/reason enums).
+- ⬜ Money stored as integer cents. Usage is the **sum of active `AccumulatorEntry`
+  rows**, not a stored total; index `(memberId, planYear, serviceType, voided)`.
 - ⬜ Migration + a thin repository layer (or Prisma client directly) behind
   small typed functions.
-- **Tests:** a repository round-trip test (create policy+rules → read back).
+- **Tests:** a repository round-trip (create plan+rules+policy → read back) and a
+  ledger-sum read (`benefitUsed` = Σ active entries).
 - **Risk/decision:** keep repositories thin; no generic DAL abstraction.
 
 ## Phase 3 — Orchestration service ⬜
 Wire the pure engine to the database. This is where the "gather facts" work lives.
-- ⬜ `submitClaim(input)`:
-  1. load member → policy → rules; match a rule per line's serviceType.
+- ⬜ `submitClaim(input)` → persist claim + lines as `submitted`, append a
+  `SUBMITTED` event. No adjudication yet (two-step decision, decisions.md §4).
+- ⬜ `adjudicateClaim(claimId)`:
+  1. load member → policy → **plan** → rules; match a rule per line's serviceType.
   2. compute `coverageActive` (policy effective window vs serviceDate).
   3. detect duplicates (prior non-denied line on
      `(member, serviceType, serviceDate, provider)`).
-  4. load accumulators for the relevant `(member, planYear)` rows.
-  5. call `adjudicateClaim` (pure).
-  6. **persist line results + accumulator deltas in ONE transaction** that locks
-     the accumulator row(s) — the serialization point.
-- ⬜ `getClaim(id)` → claim + lines + per-line adjudication breakdown + reasons.
+  4. **sum the active ledger entries** for the relevant `(member, planYear, serviceType)`.
+  5. call the pure `adjudicateClaim` engine.
+  6. **in ONE transaction that locks the member/policy row**: write one
+     `AccumulatorEntry` per finalized line, persist line results, append events.
+- ⬜ `getClaim(id)` → claim + lines + per-line adjudication breakdown + reasons (+ events).
 - **Tests (domain-level, against a test DB):**
   - deductible depletes across **two separate claims** (the cross-claim spec).
+  - `benefitUsed` reads as the sum of active ledger entries.
   - concurrent submissions for one member don't overspend a limit
     (serialization invariant).
   - a duplicate line on a second claim is denied `DUPLICATE`.
@@ -76,8 +81,9 @@ Wire the pure engine to the database. This is where the "gather facts" work live
 One reconciliation path (domain-model.md §6).
 - ⬜ `disputeLine(lineId, reason)` → line `disputed`, claim re-derives.
 - ⬜ `resolveLine(lineId, action, overrides?, note)`:
-  reverse prior delta → re-run `adjudicateLine` (with `skipManualReview` and any
-  overrides) → apply new delta → re-derive claim status, all in one txn.
+  void prior `AccumulatorEntry` → re-run `adjudicateLine` (with `skipManualReview`
+  and any overrides) → write a fresh entry → re-derive claim status → append
+  `RESOLVED` event, all in one txn.
 - ⬜ Guard: a `paid` line is **not** disputable (documented cut).
 - **Tests:**
   - overturn a denied line with `WAIVE_LIMIT` → it pays; accumulators move.
@@ -88,11 +94,17 @@ One reconciliation path (domain-model.md §6).
 
 ## Phase 5 — REST API (Fastify) ⬜
 The interface to demo with. Thin handlers over the service; validation with zod.
-- ⬜ `POST /claims` — submit a claim with line items.
-- ⬜ `GET /claims/:id` — claim + line decisions + explanations.
-- ⬜ `POST /lineitems/:id/dispute` — open a dispute.
-- ⬜ `POST /disputes/:id/resolve` — uphold/overturn (+ overrides).
-- ⬜ `POST /lineitems/:id/review` — resolve a pended line.
+Full contract → `docs/api.md`.
+- ⬜ `POST /v1/claims` — submit a claim with line items (→ `submitted`).
+- ⬜ `POST /v1/claims/:id/adjudicate` — run the engine (→ decisions).
+- ⬜ `GET /v1/claims/:id` — claim + line decisions + explanations + event timeline.
+- ⬜ `GET /v1/claims?memberId=` — list a member's claims.
+- ⬜ `POST /v1/claims/:id/pay` — finalize an approved/partial claim (→ `paid`).
+- ⬜ `POST /v1/lineitems/:id/dispute` — open a dispute.
+- ⬜ `GET /v1/disputes/:id` — dispute detail/status.
+- ⬜ `POST /v1/disputes/:id/resolve` — uphold/overturn (+ overrides).
+- ⬜ `POST /v1/lineitems/:id/review` — resolve a pended line.
+- ⬜ `GET /v1/members/:id/accumulators` — deductible met + benefit used per service/year.
 - ⬜ Validation: malformed → 422 (claim not created); domain-invalid → adjudicated `denied`.
 - **Tests:** a couple of API-level happy/edge paths (not status-code-only —
   assert the adjudication payload).

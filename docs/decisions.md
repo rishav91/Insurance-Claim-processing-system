@@ -40,6 +40,27 @@ centerpiece — it keeps policy *data* separate from adjudication *logic*. The
 alternative (rules as code/DSL) was rejected as over-engineering for the scope; a
 data table covers every rule we need and stays testable.
 
+### Plan and Policy are **separate** entities
+A **Plan** is the reusable benefit design (its coverage rules + deductible/limits); a
+**Policy** is a member's enrollment in a Plan over an effective window. Coverage rules
+belong to the Plan, so they're shared across members rather than copied per person, and
+"is the member covered on this date" (Policy) is cleanly distinct from "what does the
+plan pay" (Plan). An earlier draft conflated the two onto `Policy`; the split was made
+after a domain pass.
+
+### Usage is tracked as a **ledger**, not a mutable counter
+Each finalized line writes one `AccumulatorEntry`; `deductibleMet` / `benefitUsed` are
+the **sum of active (non-voided) entries**. Chosen over a single mutable total because:
+(a) dispute reversal becomes *void the entry* instead of reverse-then-reapply
+arithmetic that can drift; (b) every limit decision is auditable (which line consumed
+what). Cost is a `SUM` on read — negligible at this scale. The pure engine is unchanged:
+it still reads a totals snapshot and emits a delta; only the persistence boundary differs.
+
+### An append-only **event log** records every transition
+`Event` rows (`SUBMITTED`, `ADJUDICATED`, `PENDED`, `DISPUTED`, `RESOLVED`, `PAID`) make
+the lifecycle observable over time, give disputes a retroactive-change audit trail, and
+seed a real PHI access/change audit. `actor` is a plain label since auth is out of scope.
+
 ### Adjudication is **per line item**; claim status is **derived**
 `deriveClaimStatus(lineStates[])` is a total pure function (precedence table in
 `domain-model.md` §4). Claim status is never set directly, so partial approvals fall
@@ -54,9 +75,9 @@ was a deliberate modeling choice that the subagent review confirmed avoids confu
 
 ### One engine, one resolution path
 Submission, manual-review resolution, and dispute overturn all flow through the same
-`adjudicateLine` function and the same reverse-then-reapply reconciliation routine
-(`domain-model.md` §6). Single source of truth for money math and accumulator
-bookkeeping; no parallel code paths to drift apart.
+`adjudicateLine` function and the same reconciliation routine — *void the old ledger
+entry, re-run the engine, write a new entry* (`domain-model.md` §6). Single source of
+truth for money math and ledger bookkeeping; no parallel code paths to drift apart.
 
 ### Explanations are a **byproduct of execution**
 Each pipeline step emits its reason as a side effect, so the ordered `reasons[]` can
@@ -84,17 +105,20 @@ Where the prompt is silent, I made a call and recorded it:
 | **Limit-exhausted vs hard denial** | A limit-exhausted line still applies its **deductible** delta; a hard denial (excluded/duplicate/invalid) touches **no** money or accumulators. | A limit-hit service is still *covered* — the member's deductible-eligible spend is real. A not-covered service never enters the money model. |
 | **Duplicate** | Same `(member, serviceType, serviceDate, provider)` against any prior **non-denied** line. | Simple, deterministic, catches the realistic resubmission case. |
 | **Allowed amount** | `min(billed, feeSchedule)` if the rule has a schedule, else `billed`. | Preserves the `billed ≠ allowed` distinction cheaply without modeling provider contracts. |
-| **Reference data** | Members, policies, providers are **seeded**, not managed via the API. | The prompt lists account/policy management as out of scope. |
+| **Reference data** | Plans (+rules), policies, members, providers are **seeded**, not managed via the API. | The prompt lists account/policy management as out of scope. |
+| **Adjudication timing** | Two-step: `POST /claims` persists `submitted`; `POST /claims/:id/adjudicate` runs the engine. | Makes the `submitted → under_review → …` lifecycle explicit and demonstrable, matching the prompt's named flow. |
+| **Payment** | A `pay` action (`POST /claims/:id/pay`) sets `paidAmountCents`/`paidAt` fields and moves lines to `paid`. | Demonstrates the terminal lifecycle state; a separate `Payment` entity is unnecessary without clawback. |
 | **Money** | Integer **cents** everywhere; all arithmetic clamps to ≥ 0. | Avoids float drift; clamping prevents negative payable (copay > allowed, etc.). |
 
 ## 5. Concurrency
 
 I did **not** assume "single-threaded and hope." Two claims for the same member
-adjudicated concurrently both read-modify-write the same accumulator row and would lose
-updates / overspend a limit. Decision: **the accumulator row is the serialization
-point** — a claim is adjudicated inside one transaction that locks/version-checks that
-row. SQLite's single-writer model makes this concrete locally; the Postgres equivalent
-is `SELECT … FOR UPDATE`. Stated as an invariant with a test, not left to chance.
+adjudicated concurrently could each read the same ledger sum and both approve against
+the full remaining limit, overspending it. Decision: **the member/policy row is the
+serialization point** — a claim is adjudicated inside one transaction that locks that
+row before summing the ledger, so the sum→decide→insert sequence is atomic. SQLite's
+single-writer model makes this concrete locally; the Postgres equivalent is
+`SELECT … FOR UPDATE` on the member/policy row. Stated as an invariant with a test.
 
 ## 6. What I deliberately did NOT build (calibrated cuts)
 
@@ -102,7 +126,10 @@ Each of these is a conscious trade-off; none is an accident.
 
 | Cut | Why it's safe to cut | What it would take to add |
 |---|---|---|
-| **OOP maximum** | One more accumulator dimension; the deductible + per-service limit already demonstrate "track usage against limits." | One running total + one pipeline step. |
+| **Subscriber vs dependent** | One member per policy; covering multiple people on one policy adds enrollment complexity without new adjudication insight. | A member↔policy join with a role + per-member accumulators. |
+| **Group / employer sponsor** | Adjacent enrollment hierarchy; irrelevant to adjudication depth. | A Group entity above Policy. |
+| **`Payment` entity** | `paid` is terminal with no clawback, so claim-level `paidAmountCents`/`paidAt` fields suffice. | A disbursement/remittance ledger + post-payment adjustments. |
+| **OOP maximum** | One more accumulator dimension; the deductible + per-service limit already demonstrate "track usage against limits." | One more `AccumulatorEntry` dimension + one pipeline step. |
 | **Visit / frequency limits** | Same *shape* as the dollar limit (count vs cents); adds surface without new insight. | A count-based accumulator + step. |
 | **Waiting periods, pre-authorization** | Adjacent benefit rules; don't add modeling depth beyond what eligibility/exclusion already show. | Extra rule fields + pipeline gates. |
 | **In/out-of-network rate negotiation** | Would turn `provider` into a rate source; the fee schedule already gives `billed ≠ allowed`. | Provider-contract entity + network status input. |
