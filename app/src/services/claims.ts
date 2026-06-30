@@ -649,7 +649,7 @@ async function rerunLineInTx(
     );
   }
 
-  return r.outcome as LineStatus;
+  return r.outcome;
 }
 
 /** A member contests a resolved (pre-payment) line → `disputed`, claim re-derives. */
