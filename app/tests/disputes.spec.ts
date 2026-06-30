@@ -59,8 +59,8 @@ describe("disputeLine (roadmap Phase 4)", () => {
       billedAmountCents: 50_000,
     });
 
-    await disputeLine(lineId, "first appeal");
-    await resolveDispute(lineId, "uphold");
+    const first = await disputeLine(lineId, "first appeal");
+    await resolveDispute(first.id, "uphold");
 
     await expect(disputeLine(lineId, "second appeal")).rejects.toBeInstanceOf(
       ConflictError,
@@ -101,8 +101,8 @@ describe("resolveDispute — overturn (roadmap Phase 4)", () => {
       billedAmountCents: 100_000,
     });
 
-    await disputeLine(lineId, "please reconsider");
-    const view = await resolveDispute(lineId, "overturn", {
+    const dispute = await disputeLine(lineId, "please reconsider");
+    const view = await resolveDispute(dispute.id, "overturn", {
       overrides: [{ type: "WAIVE_LIMIT" }],
       note: "goodwill exception",
     });
@@ -131,8 +131,8 @@ describe("resolveDispute — overturn (roadmap Phase 4)", () => {
     expect(adj.lineItems[0]!.status).toBe("partially_approved");
     expect(adj.lineItems[0]!.payableCents).toBe(50_000);
 
-    await disputeLine(lineId, "appeal");
-    const view = await resolveDispute(lineId, "overturn", {
+    const dispute = await disputeLine(lineId, "appeal");
+    const view = await resolveDispute(dispute.id, "overturn", {
       overrides: [{ type: "WAIVE_DEDUCTIBLE" }, { type: "WAIVE_LIMIT" }],
     });
 
@@ -159,8 +159,8 @@ describe("resolveDispute — overturn (roadmap Phase 4)", () => {
       billedAmountCents: 100_000,
     });
 
-    await disputeLine(lineId, "appeal");
-    await resolveDispute(lineId, "overturn", { overrides: [{ type: "WAIVE_LIMIT" }] });
+    const dispute = await disputeLine(lineId, "appeal");
+    await resolveDispute(dispute.id, "overturn", { overrides: [{ type: "WAIVE_LIMIT" }] });
 
     // Old $500 entry voided, new $1000 entry active → 150k + 100k = 250k.
     const acc = await loadAccumulators(member.id, 2026);
@@ -203,16 +203,16 @@ describe("resolveDispute — overturn re-checks duplicate (hardening)", () => {
 
   it("keeps a DUPLICATE denial denied when overturned WITHOUT ALLOW_DUPLICATE", async () => {
     const { lineId } = await deniedDuplicateLine();
-    await disputeLine(lineId, "not a duplicate");
-    const view = await resolveDispute(lineId, "overturn"); // no override
+    const dispute = await disputeLine(lineId, "not a duplicate");
+    const view = await resolveDispute(dispute.id, "overturn"); // no override
     expect(view.lineItems[0]!.status).toBe("denied");
     expect(view.lineItems[0]!.reasons.map((r) => r.code)).toContain("DUPLICATE");
   });
 
   it("pays a DUPLICATE denial when overturned WITH ALLOW_DUPLICATE", async () => {
     const { lineId } = await deniedDuplicateLine();
-    await disputeLine(lineId, "reviewer allows it");
-    const view = await resolveDispute(lineId, "overturn", {
+    const dispute = await disputeLine(lineId, "reviewer allows it");
+    const view = await resolveDispute(dispute.id, "overturn", {
       overrides: [{ type: "ALLOW_DUPLICATE" }],
     });
     expect(view.lineItems[0]!.status).toBe("approved");
@@ -232,8 +232,8 @@ describe("resolveDispute — uphold (roadmap Phase 4)", () => {
       billedAmountCents: 150_000,
     });
 
-    await disputeLine(lineId, "appeal");
-    const view = await resolveDispute(lineId, "uphold", { note: "decision stands" });
+    const dispute = await disputeLine(lineId, "appeal");
+    const view = await resolveDispute(dispute.id, "uphold", { note: "decision stands" });
 
     expect(view.lineItems[0]!.status).toBe("partially_approved"); // back to original
     const acc = await loadAccumulators(member.id, 2026);

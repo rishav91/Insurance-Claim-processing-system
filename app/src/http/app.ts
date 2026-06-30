@@ -111,12 +111,10 @@ export function buildApp(opts: { logger?: boolean } = {}): FastifyInstance {
     return reply.send(dispute);
   });
 
-  // 8. Resolve a dispute → 200 (422 on conflicting overrides).
+  // 8. Resolve a dispute → 200 (422 on conflicting overrides, 404/409 from service).
   app.post<{ Params: { id: string } }>("/v1/disputes/:id/resolve", async (req, reply) => {
     const body = parse(resolveDisputeSchema, req.body);
-    const dispute = await getDispute(req.params.id);
-    if (!dispute) throw new NotFoundError(`dispute ${req.params.id} not found`);
-    const view = await resolveDispute(dispute.lineItemId, body.action, resolutionOpts(body));
+    const view = await resolveDispute(req.params.id, body.action, resolutionOpts(body));
     return reply.send(serializeClaim(view));
   });
 

@@ -225,7 +225,9 @@ Returns dispute status (`open` / `resolved`), the resolution, any overrides appl
 ### 8. Resolve a dispute — `POST /v1/disputes/:id/resolve`
 One reconciliation path (domain-model.md §6): void the line's prior `AccumulatorEntry`,
 re-run the engine with the overrides, write a fresh entry, re-derive claim status, append
-a `RESOLVED` event.
+a `RESOLVED` event. The service is keyed on the **dispute id** (`:id`) — the handler passes
+it straight through with no dispute→line lookup. The `open` guard is re-checked inside the
+locking transaction, so a second concurrent resolve returns `409` (decisions.md §5).
 
 **Request — overturn with overrides**
 ```json

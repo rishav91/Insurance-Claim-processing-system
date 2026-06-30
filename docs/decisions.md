@@ -139,6 +139,17 @@ locally) — acceptable for SQLite; the Postgres refinement is the per-row `FOR 
 > not that the row-lock path is exercised on SQLite. (`busy_timeout`/WAL are set on the
 > running server as defense-in-depth against any residual `SQLITE_BUSY`.)
 
+**The lock also covers re-adjudication paths.** `resolveDispute` and `reviewLine`
+change a *finalized* line, so they take the same member lock and — critically — re-read
+the transition guard (`dispute.status === "open"`, `lineItem.status === "pended"`)
+*inside* the locked transaction, not before it. Reading the guard outside the lock is a
+TOCTOU: two concurrent resolves of one dispute would both see `open`, both pass, and
+both re-run the engine (two `RESOLVED` events, a redundant void-then-rewrite). Re-reading
+under the lock makes the loser see `resolved`/non-`pended` and 409. `resolveDispute` is
+keyed on the **dispute id** the endpoint exposes (not the line id), so the HTTP handler
+needs no dispute→line translation read. Specs: *serializes two concurrent resolves/reviews
+… one wins, one 409s*.
+
 **Schema management:** I use `prisma db push` (schema is the source of truth) rather
 than a migration history. For a greenfield take-home with no production data to
 evolve, migrations would be ceremony; the schema file + `db push` is reproducible

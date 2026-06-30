@@ -538,15 +538,22 @@ interface LineContext {
   rule: PrismaCoverageRule | undefined;
 }
 
-/** Load a line plus the reference data the engine needs to re-adjudicate it. */
-async function loadLineContext(lineItemId: string): Promise<LineContext> {
-  const lineItem = await prisma.lineItem.findUnique({
+/**
+ * Load a line plus the reference data the engine needs to re-adjudicate it.
+ * Pass the transaction client so the line's mutable status is read UNDER the member
+ * lock (the resolve/review guards depend on this — see resolveDispute/reviewLine).
+ */
+async function loadLineContext(
+  lineItemId: string,
+  db: DbClient = prisma,
+): Promise<LineContext> {
+  const lineItem = await db.lineItem.findUnique({
     where: { id: lineItemId },
     include: { claim: true },
   });
   if (!lineItem) throw new NotFoundError(`line ${lineItemId} not found`);
 
-  const policy = await prisma.policy.findFirst({
+  const policy = await db.policy.findFirst({
     where: { memberId: lineItem.claim.memberId },
     include: { plan: { include: { coverageRules: true } } },
   });
@@ -700,33 +707,49 @@ export async function disputeLine(
   return toDisputeView(created);
 }
 
-/** Reviewer resolves a dispute: `uphold` (no change) or `overturn` (+overrides). */
+/**
+ * Reviewer resolves a dispute: `uphold` (no change) or `overturn` (+overrides).
+ * Keyed on the dispute id the endpoint exposes (api.md §8) — no dispute→line
+ * translation in the handler. The `open` guard is re-read UNDER the member lock so
+ * two concurrent resolves can't both pass it (TOCTOU): the loser sees `resolved`.
+ */
 export async function resolveDispute(
-  lineItemId: string,
+  disputeId: string,
   resolution: DisputeResolution,
   opts: ResolutionOptions = {},
 ): Promise<ClaimView> {
-  const ctx = await loadLineContext(lineItemId);
-  const dispute = await prisma.dispute.findUnique({ where: { lineItemId } });
-  if (!dispute) throw new NotFoundError(`no dispute for line ${lineItemId}`);
-  if (dispute.status !== "open") {
-    throw new ConflictError(`dispute for line ${lineItemId} is already resolved`);
-  }
+  // Immutable traversal only, to find the member to lock. The mutable open-check is
+  // deferred until inside the transaction, after the lock is held.
+  const head = await prisma.dispute.findUnique({
+    where: { id: disputeId },
+    include: { lineItem: { include: { claim: true } } },
+  });
+  if (!head) throw new NotFoundError(`dispute ${disputeId} not found`);
+  const memberId = head.lineItem.claim.memberId;
 
-  await prisma.$transaction(
+  const claimId = await prisma.$transaction(
     async (tx) => {
       // Same serialization point as adjudication: lock the member row first.
       await tx.member.update({
-        where: { id: ctx.claim.memberId },
+        where: { id: memberId },
         data: { version: { increment: 1 } },
       });
+
+      // Re-read the dispute UNDER the lock — a concurrent resolve that won the lock
+      // first has already flipped it to `resolved`, so this is the real guard.
+      const dispute = await tx.dispute.findUnique({ where: { id: disputeId } });
+      if (!dispute) throw new NotFoundError(`dispute ${disputeId} not found`);
+      if (dispute.status !== "open") {
+        throw new ConflictError(`dispute ${disputeId} is already resolved`);
+      }
+      const ctx = await loadLineContext(dispute.lineItemId, tx);
 
       let toState: string;
       if (resolution === "uphold") {
         // Trivial case: restore the pre-dispute outcome, no ledger change.
         toState = dispute.fromStatus;
         await tx.lineItem.update({
-          where: { id: lineItemId },
+          where: { id: dispute.lineItemId },
           data: { status: dispute.fromStatus },
         });
       } else {
@@ -734,7 +757,7 @@ export async function resolveDispute(
       }
 
       await tx.dispute.update({
-        where: { lineItemId },
+        where: { id: disputeId },
         data: {
           status: "resolved",
           resolution,
@@ -745,7 +768,7 @@ export async function resolveDispute(
       await tx.event.create({
         data: {
           claimId: ctx.claim.id,
-          lineItemId,
+          lineItemId: dispute.lineItemId,
           type: "RESOLVED",
           fromState: "disputed",
           toState,
@@ -754,11 +777,12 @@ export async function resolveDispute(
           ...(opts.overrides && { overridesApplied: JSON.stringify(opts.overrides) }),
         },
       });
+      return ctx.claim.id;
     },
     { maxWait: 10_000, timeout: 20_000 },
   );
 
-  return (await getClaim(ctx.claim.id))!;
+  return (await getClaim(claimId))!;
 }
 
 /** Reviewer resolves a pended (manual-review) line: `approve` (run engine) or `deny`. */
@@ -767,19 +791,28 @@ export async function reviewLine(
   action: ReviewAction,
   opts: ResolutionOptions = {},
 ): Promise<ClaimView> {
-  const ctx = await loadLineContext(lineItemId);
-  if (ctx.lineItem.status !== "pended") {
-    throw new ConflictError(
-      `line ${lineItemId} is not pending review (status: ${ctx.lineItem.status})`,
-    );
-  }
+  // Immutable traversal only, to find the member to lock; the mutable pended-check
+  // is re-read inside the transaction so two concurrent reviews can't both pass it.
+  const head = await prisma.lineItem.findUnique({
+    where: { id: lineItemId },
+    include: { claim: true },
+  });
+  if (!head) throw new NotFoundError(`line ${lineItemId} not found`);
+  const memberId = head.claim.memberId;
 
-  await prisma.$transaction(
+  const claimId = await prisma.$transaction(
     async (tx) => {
       await tx.member.update({
-        where: { id: ctx.claim.memberId },
+        where: { id: memberId },
         data: { version: { increment: 1 } },
       });
+
+      const ctx = await loadLineContext(lineItemId, tx);
+      if (ctx.lineItem.status !== "pended") {
+        throw new ConflictError(
+          `line ${lineItemId} is not pending review (status: ${ctx.lineItem.status})`,
+        );
+      }
 
       let toState: LineStatus;
       if (action === "approve") {
@@ -817,9 +850,10 @@ export async function reviewLine(
           ...(opts.overrides && { overridesApplied: JSON.stringify(opts.overrides) }),
         },
       });
+      return ctx.claim.id;
     },
     { maxWait: 10_000, timeout: 20_000 },
   );
 
-  return (await getClaim(ctx.claim.id))!;
+  return (await getClaim(claimId))!;
 }
