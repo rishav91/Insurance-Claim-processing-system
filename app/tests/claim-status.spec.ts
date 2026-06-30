@@ -19,8 +19,14 @@ describe("deriveClaimStatus — rollup precedence", () => {
     expect(deriveClaimStatus(["pended", "pended"])).toBe("under_review");
   });
 
-  it("is paid only when all lines are paid", () => {
+  it("is paid when all lines are paid", () => {
     expect(deriveClaimStatus(["paid", "paid"])).toBe("paid");
+  });
+
+  it("is paid (terminal) when every line is paid-or-denied with at least one paid", () => {
+    // A partially-denied claim, once disbursed, is terminal — not partially_approved.
+    expect(deriveClaimStatus(["paid", "denied"])).toBe("paid");
+    expect(deriveClaimStatus(["paid", "paid", "denied"])).toBe("paid");
   });
 
   it("is denied when all lines are denied", () => {

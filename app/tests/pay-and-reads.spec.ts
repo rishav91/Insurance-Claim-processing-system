@@ -42,6 +42,36 @@ describe("payClaim (roadmap Phase 5)", () => {
     expect(view.events.map((e) => e.type)).toContain("PAID");
   });
 
+  it("pays a partially-denied claim to a terminal paid state and rejects re-pay (409)", async () => {
+    const { member, provider } = await seedScenario({
+      rules: [
+        { serviceType: "PT", coinsuranceRate: 0 },
+        { serviceType: "COSMETIC", excluded: true },
+      ],
+    });
+    const submitted = await submitClaim({
+      memberId: member.id,
+      providerId: provider.id,
+      lines: [
+        { serviceType: "PT", serviceDate: "2026-03-01", billedAmountCents: 50_000 },
+        { serviceType: "COSMETIC", serviceDate: "2026-03-01", billedAmountCents: 40_000 },
+      ],
+    });
+    const adj = await adjudicateClaim(submitted.id);
+    expect(adj.status).toBe("partially_approved"); // one approved, one denied
+
+    const view = await payClaim(submitted.id);
+    expect(view.status).toBe("paid"); // terminal despite the denied line
+    expect(view.paidAmountCents).toBe(50_000); // only the PT line's payable
+    const paidLine = view.lineItems.find((l) => l.serviceType === "PT")!;
+    const deniedLine = view.lineItems.find((l) => l.serviceType === "COSMETIC")!;
+    expect(paidLine.status).toBe("paid");
+    expect(deniedLine.status).toBe("denied");
+
+    // Re-paying must not clobber paidAmountCents — it is terminal.
+    await expect(payClaim(submitted.id)).rejects.toBeInstanceOf(ConflictError);
+  });
+
   it("rejects paying a claim that is not in a payable state (409)", async () => {
     const { member, provider } = await seedScenario({
       rules: [{ serviceType: "PT", coinsuranceRate: 0 }],
