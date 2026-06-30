@@ -142,11 +142,11 @@ Full contract → `docs/api.md`. Runnable via `npm run dev` (tsx).
   Each scenario prints the HTTP-equivalent calls, key money fields, and a
   prose "WHAT TO OBSERVE" explanation for the evaluator.
 
-## Phase 8 — Docs & submission polish ⬜
-- ⬜ `README.md` — setup, run, test, and the demo walkthrough.
-- ⬜ `docs/self-review.md` — what's good, what's rough, what I'd change.
-- ⬜ Reconcile `decisions.md` with anything that shifted during the build.
-- ⬜ Export raw JSONL session logs into `ai-artifacts/`.
+## Phase 8 — Docs & submission polish ✅
+- ✅ `README.md` — setup, run, test, and the demo walkthrough.
+- ✅ `docs/self-review.md` — what's good, what's rough, what I'd change.
+- ✅ Reconcile `decisions.md` with anything that shifted during the build.
+- ✅ Export raw JSONL session logs into `ai-artifacts/`.
 - ⬜ Final pass: `npm test` green from a clean clone, README steps verified.
 
 ---

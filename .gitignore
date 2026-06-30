@@ -29,6 +29,9 @@ yarn-debug.log*
 # Coverage
 coverage/
 
+# AI session logs (large; not tracked in git)
+ai-artifacts/
+
 # OS / editor
 .DS_Store
 .idea/
