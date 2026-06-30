@@ -117,16 +117,30 @@ Full contract → `docs/api.md`. Runnable via `npm run dev` (tsx).
 - ✅ **Tests:** fastify.inject happy/edge paths asserting the adjudication payload
   (submit→adjudicate partial, dispute→overturn, accumulators), not just codes.
 
-## Phase 6 — Seed data ⬜
-- ⬜ Seed script: a member + policy with a realistic rule set (office visit with
-  copay, PT with coinsurance + annual limit, surgery requiring manual review, an
-  excluded cosmetic service, a fee-scheduled service) + a provider.
-- ⬜ Make the demo flows reproducible from a clean DB.
+## Phase 6 — Seed data ✅
+- ✅ `prisma/seed.ts` (`npm run db:seed` / `prisma db seed`): 4 plans (Gold PPO
+  2026, Silver HMO 2026, Bronze HDHP 2025 expired, Bronze HDHP 2026 renewal),
+  1 shared provider, 5 members with deliberately varied mid-year accumulator
+  states (deductible partially/fully met, benefit limits near/at cap, expired
+  policy, clean slate). Prior-history claims are adjudicated by the real engine
+  so the ledger entries are authentic.
+- ✅ `npm run db:reset` resets schema and reseeds atomically.
+- ✅ Documented in `docs/demo-scenarios.md` (member states table).
 
-## Phase 7 — End-to-end demo flows ⬜
-- ⬜ A scripted walk-through (curl or a `.http` file / short script) covering:
-  submit → partial approval → dispute → overturn → pended review. This is the
-  "walk us through it" artifact.
+## Phase 7 — End-to-end demo flows ✅
+- ✅ `demo/run.ts` (`npm run demo`): self-contained walk-through script —
+  resets + reseeds the DB, then exercises 8 scenarios end-to-end against the
+  real service layer (same functions the HTTP handlers call):
+    1. Office visit copay → approved (invariant check printed)
+    2. PT near annual limit → partial approval with full money breakdown
+    3. Deductible depletes across two claims (before/after accumulators)
+    4. Exclusion denial + cross-claim duplicate detection
+    5. Manual review: SURGERY pended → reviewer approves → paid
+    6. Dispute + WAIVE_LIMIT overturn (order-dependence made visible)
+    7. Concurrent adjudication — shared limit never overspent (`Promise.all`)
+    8. Same claim adjudicated twice concurrently — one 409, ledger untouched
+  Each scenario prints the HTTP-equivalent calls, key money fields, and a
+  prose "WHAT TO OBSERVE" explanation for the evaluator.
 
 ## Phase 8 — Docs & submission polish ⬜
 - ⬜ `README.md` — setup, run, test, and the demo walkthrough.

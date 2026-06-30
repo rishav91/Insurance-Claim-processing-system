@@ -15,5 +15,5 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["src", "tests", "prisma"]
+  "include": ["src", "tests", "prisma", "demo"]
 }

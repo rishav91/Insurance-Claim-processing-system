@@ -14,6 +14,7 @@
     "db:push": "prisma db push",
     "db:seed": "npx tsx prisma/seed.ts",
     "db:reset": "prisma db push --force-reset && npm run db:seed",
+    "demo": "npx tsx demo/run.ts",
     "dev": "tsx watch src/http/server.ts",
     "start": "tsx src/http/server.ts"
   },
