@@ -69,6 +69,15 @@ export function adjudicateLine(
   const overrides = ctx.overrides ?? [];
   const has = (t: Override["type"]): boolean => overrides.some((o) => o.type === t);
 
+  // A parameterized override may appear at most once — two OVERRIDE_ALLOWED_AMOUNT
+  // values are ambiguous (domain-model.md §5). Domain invariant, parallel to the
+  // copay-XOR-coinsurance throw; the HTTP layer also rejects this at the zod edge.
+  if (overrides.filter((o) => o.type === "OVERRIDE_ALLOWED_AMOUNT").length > 1) {
+    throw new Error(
+      "Invalid override set: at most one OVERRIDE_ALLOWED_AMOUNT may be applied",
+    );
+  }
+
   // Step 1 — validate (known service type with a matching rule).
   if (!ctx.rule || ctx.rule.serviceType !== line.serviceType) {
     return hardDenial(
