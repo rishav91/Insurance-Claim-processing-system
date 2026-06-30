@@ -38,7 +38,11 @@ import { ConflictError, NotFoundError, ValidationError } from "./errors.js";
 /** A valid ISO calendar date — keeps planYearOf / eligibility on one clean clock. */
 function isValidServiceDate(s: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
-  return Number.isFinite(new Date(`${s}T00:00:00Z`).getTime());
+  const d = new Date(`${s}T00:00:00Z`);
+  if (!Number.isFinite(d.getTime())) return false;
+  // Reject calendar-impossible dates (e.g. 2026-02-30): `Date` silently rolls them
+  // forward, so require the parsed value to round-trip back to the same string.
+  return d.toISOString().slice(0, 10) === s;
 }
 
 export interface SubmitLineInput {

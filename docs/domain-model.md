@@ -97,6 +97,12 @@ Two things changed from the first draft, after a domain pass:
 > lines straddle a year boundary simply hits **two different accumulators**, one per
 > line, which falls out of per-line adjudication for free. Plan year = calendar year
 > for now; non-calendar plan years (e.g. Oct–Sep) are a config extension.
+>
+> Because `serviceDate` is this single clock, submit-time validation rejects a date
+> that isn't a real calendar day — not just a shape check. `2026-02-30` matches
+> `YYYY-MM-DD` but `new Date` rolls it forward to Mar 2, which would silently
+> mis-bucket eligibility and the accumulator year; the validator requires the parsed
+> date to round-trip back to the same string, so the claim is a `422` and no row is written.
 > **Timely-filing limits** (rejecting claims filed too long after service) are a named cut.
 
 ### CoverageRule — *the centerpiece; data, interpreted by the engine*
