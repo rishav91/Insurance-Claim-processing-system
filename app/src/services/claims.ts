@@ -328,6 +328,15 @@ export async function adjudicateClaim(claimId: string): Promise<ClaimView> {
         data: { version: { increment: 1 } },
       });
 
+      // Re-check AFTER the lock. A concurrent adjudication that won the lock first
+      // already moved lines past "submitted"; using our stale claim.lineItems would
+      // re-run the engine and write duplicate AccumulatorEntries without voiding.
+      const alreadyMoved = await tx.lineItem.findFirst({
+        where: { claimId: claim.id, NOT: { status: "submitted" } },
+        select: { id: true },
+      });
+      if (alreadyMoved) throw new ConflictError(`claim ${claimId} has already been adjudicated`);
+
       // Gather per-line facts — coverage resolved per line by its service date.
       const engineLines: ClaimLineForAdjudication[] = [];
       for (const l of claim.lineItems) {
@@ -471,39 +480,57 @@ const PAYABLE_LINE: ReadonlySet<string> = new Set(["approved", "partially_approv
  * `paid` is terminal — paid lines are no longer disputable (§4).
  */
 export async function payClaim(claimId: string): Promise<ClaimView> {
-  const claim = await prisma.claim.findUnique({
+  // Immutable read outside the transaction — only for the 404 check and to find
+  // the memberId for the lock. The authoritative state checks happen under the lock.
+  const head = await prisma.claim.findUnique({
     where: { id: claimId },
-    include: { lineItems: true },
+    select: { id: true, memberId: true },
   });
-  if (!claim) throw new NotFoundError(`claim ${claimId} not found`);
+  if (!head) throw new NotFoundError(`claim ${claimId} not found`);
 
-  // Terminal guard: a claim with any paid line is already disbursed (§4).
-  if (claim.lineItems.some((l) => l.status === "paid")) {
-    throw new ConflictError(`claim ${claimId} is already paid`);
-  }
+  await prisma.$transaction(
+    async (tx) => {
+      // Same serialization point as adjudication: lock the member row so a concurrent
+      // adjudication or payClaim for the same member can't race the state checks below.
+      await tx.member.update({
+        where: { id: head.memberId },
+        data: { version: { increment: 1 } },
+      });
 
-  const status = deriveClaimStatus(claim.lineItems.map((l) => l.status as LineStatus));
-  if (status !== "approved" && status !== "partially_approved") {
-    throw new ConflictError(
-      `claim ${claimId} is not in a payable state (status: ${status})`,
-    );
-  }
+      // Re-read line states UNDER the lock — the pre-transaction snapshot is stale.
+      const lines = await tx.lineItem.findMany({
+        where: { claimId },
+        select: { id: true, status: true, payableCents: true },
+      });
 
-  const payLines = claim.lineItems.filter((l) => PAYABLE_LINE.has(l.status));
-  const paidAmountCents = payLines.reduce((sum, l) => sum + (l.payableCents ?? 0), 0);
+      // Terminal guard: a claim with any paid line is already disbursed (§4).
+      if (lines.some((l) => l.status === "paid")) {
+        throw new ConflictError(`claim ${claimId} is already paid`);
+      }
 
-  await prisma.$transaction(async (tx) => {
-    for (const l of payLines) {
-      await tx.lineItem.update({ where: { id: l.id }, data: { status: "paid" } });
-    }
-    await tx.claim.update({
-      where: { id: claimId },
-      data: { paidAmountCents, paidAt: new Date() },
-    });
-    await tx.event.create({
-      data: { claimId, type: "PAID", toState: "paid", actor: "system" },
-    });
-  });
+      const status = deriveClaimStatus(lines.map((l) => l.status as LineStatus));
+      if (status !== "approved" && status !== "partially_approved") {
+        throw new ConflictError(
+          `claim ${claimId} is not in a payable state (status: ${status})`,
+        );
+      }
+
+      const payLines = lines.filter((l) => PAYABLE_LINE.has(l.status));
+      const paidAmountCents = payLines.reduce((sum, l) => sum + (l.payableCents ?? 0), 0);
+
+      for (const l of payLines) {
+        await tx.lineItem.update({ where: { id: l.id }, data: { status: "paid" } });
+      }
+      await tx.claim.update({
+        where: { id: claimId },
+        data: { paidAmountCents, paidAt: new Date() },
+      });
+      await tx.event.create({
+        data: { claimId, type: "PAID", toState: "paid", actor: "system" },
+      });
+    },
+    { maxWait: 10_000, timeout: 20_000 },
+  );
 
   return (await getClaim(claimId))!;
 }

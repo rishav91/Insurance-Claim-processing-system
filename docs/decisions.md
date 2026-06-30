@@ -164,16 +164,20 @@ locally) — acceptable for SQLite; the Postgres refinement is the per-row `FOR 
 > not that the row-lock path is exercised on SQLite. (`busy_timeout`/WAL are set on the
 > running server as defense-in-depth against any residual `SQLITE_BUSY`.)
 
-**The lock also covers re-adjudication paths.** `resolveDispute` and `reviewLine`
-change a *finalized* line, so they take the same member lock and — critically — re-read
-the transition guard (`dispute.status === "open"`, `lineItem.status === "pended"`)
-*inside* the locked transaction, not before it. Reading the guard outside the lock is a
-TOCTOU: two concurrent resolves of one dispute would both see `open`, both pass, and
-both re-run the engine (two `RESOLVED` events, a redundant void-then-rewrite). Re-reading
-under the lock makes the loser see `resolved`/non-`pended` and 409. `resolveDispute` is
-keyed on the **dispute id** the endpoint exposes (not the line id), so the HTTP handler
-needs no dispute→line translation read. Specs: *serializes two concurrent resolves/reviews
-… one wins, one 409s*.
+**The same principle — read state under the lock, not before it — applies to every mutating path.** `resolveDispute` and `reviewLine` re-read their transition guards (`dispute.status === "open"`, `lineItem.status === "pended"`) *inside* the locked transaction so two concurrent resolves of the same dispute can't both see `open`, both pass, and emit two `RESOLVED` events. `adjudicateClaim` re-reads line statuses inside the transaction after the lock so a second concurrent call on the same claim id (which would otherwise re-run the engine and write duplicate `AccumulatorEntry` rows against an already-moved accumulator) sees the non-`submitted` lines and 409s. `payClaim` takes the same member lock and re-reads line states inside the transaction, preventing two concurrent disbursements from each writing a `PAID` event. The loser in every case is the one whose state re-read — under the lock — shows the transition already happened; it returns 409. `resolveDispute` is keyed on the **dispute id** the endpoint exposes (not the line id), so the HTTP handler needs no dispute→line translation read. Specs: *serializes two concurrent adjudications / payments / resolves / reviews on the same resource — one wins, one 409s*.
+
+**Idempotency keys — deliberate cut.** The system uses 409 semantics (reject duplicate)
+rather than true idempotency (idempotency-key header + cached-response replay):
+- **Adjudicate retry:** `POST /claims/:id/adjudicate` already returns 409 on re-call;
+  the caller retries by doing `GET /claims/:id` instead of re-triggering.
+- **Claim re-submission:** submitting the same claim twice creates a second claim row, but
+  adjudication of the second claim will detect its lines as `DUPLICATE` against the first
+  (same member + provider + service + date), so the over-submit is caught at adjudication.
+- **Pay retry:** `payClaim` now re-checks under the lock and 409s if already paid.
+- True idempotency (a separate idempotency-key table + response cache + header convention)
+  is a non-trivial cross-cutting concern that adds no adjudication depth. The
+  operator-driven insurance workflow is low-frequency; the 409-and-GET pattern covers the
+  realistic retry cases. Not built.
 
 **Schema management:** I use `prisma db push` (schema is the source of truth) rather
 than a migration history. For a greenfield take-home with no production data to
