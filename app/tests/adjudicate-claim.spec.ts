@@ -78,6 +78,36 @@ describe("adjudicateClaim — intra-claim accumulator folding", () => {
   });
 });
 
+describe("adjudicateClaim — intra-claim duplicate detection", () => {
+  it("denies a second identical (serviceType, serviceDate) line in the same claim as DUPLICATE", () => {
+    // Flat copay, NO annual limit — without dup detection both pay in full.
+    const ptCopay: CoverageRule = { serviceType: "PT", copayCents: 2000 };
+    const mk = (id: string): ClaimLineForAdjudication => ({
+      id,
+      line: { serviceType: "PT", serviceDate: "2026-03-01", billedAmountCents: 10000 },
+      rule: ptCopay,
+      coverageActive: true,
+      isDuplicate: false,
+    });
+
+    const res = adjudicateClaim({
+      lines: [mk("a"), mk("b")],
+      deductibleAnnualCents: 0,
+      initialDeductibleMetByYear: {},
+      initialBenefitUsedByYearService: {},
+    });
+
+    const a = res.lines.find((l) => l.id === "a")!.result;
+    const b = res.lines.find((l) => l.id === "b")!.result;
+
+    expect(a.outcome).toBe("approved");
+    expect(a.payableCents).toBe(8000); // 10000 − 2000 copay
+    expect(b.outcome).toBe("denied"); // second occurrence is a duplicate
+    expect(b.reasons.map((r) => r.code)).toContain("DUPLICATE");
+    expect(b.payableCents).toBe(0); // not paid twice
+  });
+});
+
 describe("adjudicateClaim — plan year keyed by service date", () => {
   it("a claim straddling a year boundary updates two separate deductible accumulators", () => {
     // $600 annual deductible; two $500 lines, one in each year.
