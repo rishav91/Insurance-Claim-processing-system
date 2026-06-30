@@ -6,7 +6,6 @@ import {
   disputeLine,
   getClaim,
   getDispute,
-  getDisputeByLine,
   getMemberAccumulators,
   listClaims,
   payClaim,
@@ -98,11 +97,11 @@ export function buildApp(opts: { logger?: boolean } = {}): FastifyInstance {
     return reply.send(serializeClaim(view));
   });
 
-  // 6. Dispute a line → 201 (the dispute object).
+  // 6. Dispute a line → 201 (the dispute object, returned by the service directly).
   app.post<{ Params: { id: string } }>("/v1/lineitems/:id/dispute", async (req, reply) => {
     const body = parse(disputeSchema, req.body);
-    await disputeLine(req.params.id, body.reason);
-    return reply.code(201).send(await getDisputeByLine(req.params.id));
+    const dispute = await disputeLine(req.params.id, body.reason);
+    return reply.code(201).send(dispute);
   });
 
   // 7. Get a dispute → 200 / 404.

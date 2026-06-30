@@ -497,11 +497,6 @@ export async function getDispute(disputeId: string): Promise<DisputeView | null>
   return d ? toDisputeView(d) : null;
 }
 
-export async function getDisputeByLine(lineItemId: string): Promise<DisputeView | null> {
-  const d = await prisma.dispute.findUnique({ where: { lineItemId } });
-  return d ? toDisputeView(d) : null;
-}
-
 export async function getMemberAccumulators(
   memberId: string,
   planYear: number,
@@ -652,15 +647,19 @@ async function rerunLineInTx(
   return r.outcome;
 }
 
-/** A member contests a resolved (pre-payment) line → `disputed`, claim re-derives. */
+/**
+ * A member contests a resolved (pre-payment) line → `disputed`, claim re-derives.
+ * Returns the created dispute (api.md §6 returns the dispute, not the claim), so the
+ * HTTP layer needs no second read — the row is already in hand inside the transaction.
+ */
 export async function disputeLine(
   lineItemId: string,
   reason: string,
-): Promise<ClaimView> {
+): Promise<DisputeView> {
   // Read-check-act inside one transaction (consistent with adjudication's locking
   // discipline), so a concurrent pay/resolve can't change the line between the
   // disputability check and the dispute write.
-  const claimId = await prisma.$transaction(async (tx) => {
+  const created = await prisma.$transaction(async (tx) => {
     const lineItem = await tx.lineItem.findUnique({ where: { id: lineItemId } });
     if (!lineItem) throw new NotFoundError(`line ${lineItemId} not found`);
     if (!DISPUTABLE.has(lineItem.status)) {
@@ -677,7 +676,7 @@ export async function disputeLine(
       );
     }
 
-    await tx.dispute.create({
+    const dispute = await tx.dispute.create({
       data: { lineItemId, reason, fromStatus: lineItem.status, status: "open" },
     });
     await tx.lineItem.update({
@@ -695,10 +694,10 @@ export async function disputeLine(
         note: reason,
       },
     });
-    return lineItem.claimId;
+    return dispute;
   });
 
-  return (await getClaim(claimId))!;
+  return toDisputeView(created);
 }
 
 /** Reviewer resolves a dispute: `uphold` (no change) or `overturn` (+overrides). */
