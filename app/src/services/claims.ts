@@ -33,7 +33,13 @@ import {
   writeAccumulatorEntry,
   type DbClient,
 } from "../db/repositories.js";
-import { ConflictError, NotFoundError } from "./errors.js";
+import { ConflictError, NotFoundError, ValidationError } from "./errors.js";
+
+/** A valid ISO calendar date — keeps planYearOf / eligibility on one clean clock. */
+function isValidServiceDate(s: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  return Number.isFinite(new Date(`${s}T00:00:00Z`).getTime());
+}
 
 export interface SubmitLineInput {
   serviceType: string;
@@ -136,6 +142,13 @@ function toClaimView(claim: Claim & { lineItems: LineItem[]; events: Event[] }):
 
 /** Two-step flow, step 1: persist the claim as `submitted`. No adjudication. */
 export async function submitClaim(input: SubmitClaimInput): Promise<ClaimView> {
+  const badDates = input.lines.filter((l) => !isValidServiceDate(l.serviceDate));
+  if (badDates.length > 0) {
+    throw new ValidationError("line items have invalid serviceDate(s)", badDates.map(
+      (l) => ({ path: "serviceDate", issue: `not an ISO date: ${l.serviceDate}` }),
+    ));
+  }
+
   const claim = await prisma.$transaction(async (tx) => {
     const created = await tx.claim.create({
       data: {
