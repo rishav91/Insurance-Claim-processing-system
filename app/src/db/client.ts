@@ -25,3 +25,17 @@ export const prisma = new PrismaClient({
 });
 
 export type Db = PrismaClient;
+
+/**
+ * SQLite hardening for the running server: WAL lets a reader and the single writer
+ * coexist, and busy_timeout makes any lock contention wait briefly instead of
+ * throwing SQLITE_BUSY (which would surface as a 500). Best-effort.
+ */
+export async function configureSqlitePragmas(): Promise<void> {
+  if (url && url.startsWith("file:")) {
+    // These PRAGMAs return a row (the resulting mode/value), so use queryRaw —
+    // executeRaw rejects statements that yield results on SQLite.
+    await prisma.$queryRawUnsafe("PRAGMA journal_mode = WAL");
+    await prisma.$queryRawUnsafe("PRAGMA busy_timeout = 5000");
+  }
+}

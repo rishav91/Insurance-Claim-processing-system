@@ -242,6 +242,10 @@ Reviewer disposition of a `pended` line. `approve` re-runs the engine with
 
 ### 10. Member accumulators — `GET /v1/members/:id/accumulators`
 Showcases the "track usage against limits" signal — usage is summed live from the ledger.
+Accepts `?planYear=` (defaults to the current calendar year). `deductibleMetCents` /
+`benefitUsedByServiceType` are scoped to that year; `deductibleAnnualCents` and
+`limitsByServiceType` are the plan's current configured figures (plan-level, not
+year-historical — the plan keeps no per-year design history in this scope).
 
 **Response `200`**
 ```json

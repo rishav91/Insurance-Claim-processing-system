@@ -657,23 +657,26 @@ export async function disputeLine(
   lineItemId: string,
   reason: string,
 ): Promise<ClaimView> {
-  const lineItem = await prisma.lineItem.findUnique({ where: { id: lineItemId } });
-  if (!lineItem) throw new NotFoundError(`line ${lineItemId} not found`);
-  if (!DISPUTABLE.has(lineItem.status)) {
-    throw new ConflictError(
-      `line ${lineItemId} is not disputable (status: ${lineItem.status})`,
-    );
-  }
-  // One dispute per line (decisions.md): re-appeals are out of scope. Pre-check so
-  // a second dispute is a clean 409, not a raw unique-constraint violation (500).
-  const existing = await prisma.dispute.findUnique({ where: { lineItemId } });
-  if (existing) {
-    throw new ConflictError(
-      `line ${lineItemId} already has a dispute (status: ${existing.status})`,
-    );
-  }
+  // Read-check-act inside one transaction (consistent with adjudication's locking
+  // discipline), so a concurrent pay/resolve can't change the line between the
+  // disputability check and the dispute write.
+  const claimId = await prisma.$transaction(async (tx) => {
+    const lineItem = await tx.lineItem.findUnique({ where: { id: lineItemId } });
+    if (!lineItem) throw new NotFoundError(`line ${lineItemId} not found`);
+    if (!DISPUTABLE.has(lineItem.status)) {
+      throw new ConflictError(
+        `line ${lineItemId} is not disputable (status: ${lineItem.status})`,
+      );
+    }
+    // One dispute per line (decisions.md): re-appeals are out of scope. Pre-check so
+    // a second dispute is a clean 409, not a raw unique-constraint violation (500).
+    const existing = await tx.dispute.findUnique({ where: { lineItemId } });
+    if (existing) {
+      throw new ConflictError(
+        `line ${lineItemId} already has a dispute (status: ${existing.status})`,
+      );
+    }
 
-  await prisma.$transaction(async (tx) => {
     await tx.dispute.create({
       data: { lineItemId, reason, fromStatus: lineItem.status, status: "open" },
     });
@@ -692,9 +695,10 @@ export async function disputeLine(
         note: reason,
       },
     });
+    return lineItem.claimId;
   });
 
-  return (await getClaim(lineItem.claimId))!;
+  return (await getClaim(claimId))!;
 }
 
 /** Reviewer resolves a dispute: `uphold` (no change) or `overturn` (+overrides). */

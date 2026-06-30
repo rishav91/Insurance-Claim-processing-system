@@ -129,6 +129,16 @@ for one member do not overspend a shared limit* fails without this. Trade-off: a
 single connection over-serializes (different members can't proceed in parallel
 locally) — acceptable for SQLite; the Postgres refinement is the per-row `FOR UPDATE`.
 
+> **Honest note on what the test proves.** On SQLite the `connection_limit=1` pin **is**
+> the serializer — an interactive transaction holds the one connection for its whole
+> duration, so a second transaction can't even `BEGIN` until the first commits. The
+> `Member.version` bump is therefore the **portability seam** (it becomes the literal
+> `SELECT … FOR UPDATE` target on Postgres, where a pool > 1 lets *different* members
+> proceed in parallel while same-member claims serialize on that row), not the
+> load-bearing lock locally. The passing concurrency spec proves the **invariant holds**,
+> not that the row-lock path is exercised on SQLite. (`busy_timeout`/WAL are set on the
+> running server as defense-in-depth against any residual `SQLITE_BUSY`.)
+
 **Schema management:** I use `prisma db push` (schema is the source of truth) rather
 than a migration history. For a greenfield take-home with no production data to
 evolve, migrations would be ceremony; the schema file + `db push` is reproducible
