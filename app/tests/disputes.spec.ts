@@ -172,6 +172,47 @@ describe("resolveDispute — overturn (roadmap Phase 4)", () => {
   });
 });
 
+describe("resolveDispute — overturn re-checks duplicate (hardening)", () => {
+  /** Set up a member whose 2nd claim line is a denied DUPLICATE; return that line. */
+  async function deniedDuplicateLine() {
+    const { member, provider } = await seedScenario({
+      rules: [{ serviceType: "PT", coinsuranceRate: 0 }],
+    });
+    // First claim establishes the prior non-denied line.
+    await adjudicatedClaim(member.id, provider.id, {
+      serviceType: "PT",
+      serviceDate: "2026-03-01",
+      billedAmountCents: 50_000,
+    });
+    // Second claim: same service/date/provider → DUPLICATE.
+    const dup = await adjudicatedClaim(member.id, provider.id, {
+      serviceType: "PT",
+      serviceDate: "2026-03-01",
+      billedAmountCents: 50_000,
+    });
+    expect(dup.view.lineItems[0]!.status).toBe("denied");
+    return { member, lineId: dup.lineId };
+  }
+
+  it("keeps a DUPLICATE denial denied when overturned WITHOUT ALLOW_DUPLICATE", async () => {
+    const { lineId } = await deniedDuplicateLine();
+    await disputeLine(lineId, "not a duplicate");
+    const view = await resolveDispute(lineId, "overturn"); // no override
+    expect(view.lineItems[0]!.status).toBe("denied");
+    expect(view.lineItems[0]!.reasons.map((r) => r.code)).toContain("DUPLICATE");
+  });
+
+  it("pays a DUPLICATE denial when overturned WITH ALLOW_DUPLICATE", async () => {
+    const { lineId } = await deniedDuplicateLine();
+    await disputeLine(lineId, "reviewer allows it");
+    const view = await resolveDispute(lineId, "overturn", {
+      overrides: [{ type: "ALLOW_DUPLICATE" }],
+    });
+    expect(view.lineItems[0]!.status).toBe("approved");
+    expect(view.lineItems[0]!.payableCents).toBe(50_000);
+  });
+});
+
 describe("resolveDispute — uphold (roadmap Phase 4)", () => {
   it("restores the original outcome and changes no accumulators", async () => {
     const { member, provider } = await seedScenario({
