@@ -413,6 +413,11 @@ export async function payClaim(claimId: string): Promise<ClaimView> {
   });
   if (!claim) throw new NotFoundError(`claim ${claimId} not found`);
 
+  // Terminal guard: a claim with any paid line is already disbursed (§4).
+  if (claim.lineItems.some((l) => l.status === "paid")) {
+    throw new ConflictError(`claim ${claimId} is already paid`);
+  }
+
   const status = deriveClaimStatus(claim.lineItems.map((l) => l.status as LineStatus));
   if (status !== "approved" && status !== "partially_approved") {
     throw new ConflictError(

@@ -15,7 +15,9 @@ export function deriveClaimStatus(lineStates: LineStatus[]): ClaimStatus {
   // Precedence (top wins):
   if (has("pended") || has("disputed")) return "under_review"; // 1. cannot finalize
   if (all("submitted")) return "submitted"; //                    nothing adjudicated yet
-  if (all("paid")) return "paid"; //                            2. fully disbursed (terminal)
+  // 2. disbursed (terminal): every line is paid-or-denied with at least one paid.
+  //    A partially-denied claim, once paid, is terminal — not partially_approved.
+  if (has("paid") && lineStates.every((s) => s === "paid" || s === "denied")) return "paid";
   if (all("denied")) return "denied"; //                        3.
   if (all("approved")) return "approved"; //                    4.
   return "partially_approved"; //                               5. any surviving mix

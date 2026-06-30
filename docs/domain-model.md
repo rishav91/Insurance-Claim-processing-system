@@ -305,17 +305,19 @@ ClaimStatus`, evaluated by **first matching precedence rule** (top wins):
 | # | Condition over the line-state multiset | Claim status |
 |---|---|---|
 | 1 | any line `pended` **or** `disputed` (unresolved) | `under_review` |
-| 2 | **all** lines `paid` | `paid` |
+| 2 | every line `paid` **or** `denied`, with **≥ 1 paid** | `paid` |
 | 3 | **all** lines `denied` | `denied` |
 | 4 | **all** lines `approved` (none denied/partial) | `approved` |
 | 5 | otherwise (any mix of approved / partially_approved / denied) | `partially_approved` |
 
 Notes that close the reviewer's edge cases:
 - **All-pended** falls under rule 1 → `under_review` (correctly "nothing decided yet").
-- **`paid` is terminal at the claim level too:** a claim is `paid` only when *all* lines are
-  `paid` (rule 2). Because paid lines aren't disputable (§4), a fully-paid claim cannot
-  revert — rule 1 can never re-fire on it. This removes the earlier "paid claim with a
-  disputed line" contradiction.
+- **`paid` is terminal at the claim level too:** a claim is `paid` once every line is
+  `paid` or `denied` with at least one `paid` (rule 2) — a *partially-denied* claim, once
+  disbursed, is terminal, **not** `partially_approved`. Because paid lines aren't disputable
+  (§4), a paid claim cannot revert — rule 1 can never re-fire on it. This both removes the
+  earlier "paid claim with a disputed line" contradiction and prevents a disbursed
+  partially-denied claim from looking unfinished (or being re-paid).
 - **Paid amount = Σ payable of `paid` lines**, computed once at disbursement and stored —
   not recomputed on read, so no double-counting.
 
