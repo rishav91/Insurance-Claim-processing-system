@@ -12,8 +12,13 @@
     "lint:fix": "eslint . --fix",
     "prepare": "git -C .. config core.hooksPath .githooks || true",
     "db:push": "prisma db push",
+    "db:seed": "npx tsx prisma/seed.ts",
+    "db:reset": "prisma db push --force-reset && npm run db:seed",
     "dev": "tsx watch src/http/server.ts",
     "start": "tsx src/http/server.ts"
+  },
+  "prisma": {
+    "seed": "npx tsx prisma/seed.ts"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
