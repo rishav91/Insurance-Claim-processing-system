@@ -1,0 +1,10 @@
+#!/bin/sh
+# Run ESLint before every commit. The npm project lives in app/.
+# Fails the commit on any lint error. Bypass in emergencies with `git commit --no-verify`.
+set -e
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root/app"
+
+echo "pre-commit: running lint…"
+npm run --silent lint
