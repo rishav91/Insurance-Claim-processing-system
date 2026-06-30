@@ -182,4 +182,28 @@ describe("adjudicateLine — reviewer overrides", () => {
     expect(r.allowedCents).toBe(30000);
     expect(r.payableCents).toBe(24000); // 80% of $300
   });
+
+  it("MARK_ELIGIBLE forces an inactive-coverage line to be covered", () => {
+    const r = adjudicateLine(
+      line,
+      ctx({ coverageActive: false, overrides: [{ type: "MARK_ELIGIBLE" }] }),
+    );
+    expect(r.outcome).not.toBe("denied");
+    expect(r.reasons.map((x) => x.code)).not.toContain("COVERAGE_INACTIVE");
+    expect(r.payableCents).toBe(40000); // 80% of $500, deductible already met
+  });
+
+  it("rejects two conflicting OVERRIDE_ALLOWED_AMOUNT directives (engine invariant)", () => {
+    expect(() =>
+      adjudicateLine(
+        line,
+        ctx({
+          overrides: [
+            { type: "OVERRIDE_ALLOWED_AMOUNT", valueCents: 30000 },
+            { type: "OVERRIDE_ALLOWED_AMOUNT", valueCents: 40000 },
+          ],
+        }),
+      ),
+    ).toThrow(/OVERRIDE_ALLOWED_AMOUNT/);
+  });
 });
