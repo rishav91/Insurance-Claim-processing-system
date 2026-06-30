@@ -573,6 +573,9 @@ async function rerunLineInTx(
   const year = planYearOf(lineItem.serviceDate);
   const acc = await loadAccumulators(claim.memberId, year, tx);
 
+  // Re-derive the SAME facts the engine saw at adjudication, so an overturn that
+  // supplies no override doesn't silently bypass a gate. Duplicate must be
+  // recomputed (like coverageActive) — it is only bypassed via ALLOW_DUPLICATE.
   const adjCtx: AdjudicationContext = {
     ...(rule && { rule: toEngineRule(rule) }),
     coverageActive: coverageActiveOn(
@@ -580,7 +583,13 @@ async function rerunLineInTx(
       policy.effectiveFrom,
       policy.effectiveTo,
     ),
-    isDuplicate: false,
+    isDuplicate: await hasDuplicate(tx, {
+      memberId: claim.memberId,
+      providerId: claim.providerId,
+      serviceType: lineItem.serviceType,
+      serviceDate: lineItem.serviceDate,
+      excludeClaimId: claim.id,
+    }),
     accumulator: {
       deductibleAnnualCents: plan.deductibleAnnualCents,
       deductibleMetCents: acc.deductibleMetCents,
