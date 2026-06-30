@@ -86,6 +86,11 @@ sets it directly.
 ### 1. Submit a claim — `POST /v1/claims`
 Persists the claim and its lines as `submitted`. Does **not** adjudicate (two-step).
 
+> **No `policyId` in the body — by design.** Which enrollment applies is *derived* from
+> each line's `serviceDate` (the policy whose window contains it), not asserted by the
+> submitter; a claimant can't pick their coverage. Lines that straddle a renewal resolve
+> to different policies. See decisions.md ("Coverage is resolved per line, by date of service").
+
 **Request**
 ```json
 {

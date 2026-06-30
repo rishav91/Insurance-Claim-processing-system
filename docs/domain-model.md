@@ -90,6 +90,14 @@ Two things changed from the first draft, after a domain pass:
 | planId | FK → Plan |
 | effectiveFrom / effectiveTo | eligibility window (drives the active-on-serviceDate check) |
 
+> **Coverage is resolved per line by service date.** A member may hold several policies
+> over time (a renewal is consecutive non-overlapping windows); each line is adjudicated
+> under the policy whose window contains *its own* `serviceDate`, so its coverage rule and
+> annual deductible come from that line's plan. Windows are constrained **non-overlapping
+> per member** (single active coverage), making the match unique; a date in no window is
+> `COVERAGE_INACTIVE`. Coverage is therefore *derived from the service date, never asserted
+> on submit* — there is no `policyId` in the request. See decisions.md.
+
 > **Plan year is governed by the date of service, not the submission date.** A
 > service rendered Dec 2025 but submitted Jan 2026 counts against the **2025**
 > deductible and limits. Consequences: (a) eligibility (step 3) and the accumulator

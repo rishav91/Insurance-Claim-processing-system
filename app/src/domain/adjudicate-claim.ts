@@ -9,13 +9,16 @@ export interface ClaimLineForAdjudication {
   rule?: CoverageRule | undefined;
   coverageActive: boolean;
   isDuplicate: boolean;
+  /**
+   * Annual deductible of the plan resolved for THIS line's service date — per-line
+   * because a claim can straddle a renewal into a different plan (domain-model.md §2).
+   */
+  deductibleAnnualCents: number;
   overrides?: Override[];
 }
 
 export interface ClaimAdjudicationInput {
   lines: ClaimLineForAdjudication[];
-  /** Policy-level annual deductible (same figure resets each plan year). */
-  deductibleAnnualCents: number;
   /** Deductible already met per plan year, from the DB. */
   initialDeductibleMetByYear: Record<number, number>;
   /** Insurer-paid so far, keyed `${planYear}:${serviceType}`, from the DB. */
@@ -72,7 +75,7 @@ export function adjudicateClaim(input: ClaimAdjudicationInput): ClaimAdjudicatio
       coverageActive: cl.coverageActive,
       isDuplicate: cl.isDuplicate || seenNonDeniedKeys.has(key),
       accumulator: {
-        deductibleAnnualCents: input.deductibleAnnualCents,
+        deductibleAnnualCents: cl.deductibleAnnualCents,
         deductibleMetCents: dedMet[year] ?? 0,
         benefitUsedCents: benUsed[bKey] ?? 0,
       },

@@ -25,6 +25,7 @@ function line(
   serviceDate: string,
   billedAmountCents: number,
   rule: CoverageRule = ptFull,
+  deductibleAnnualCents = 0,
 ): ClaimLineForAdjudication {
   return {
     id,
@@ -32,6 +33,7 @@ function line(
     rule,
     coverageActive: true,
     isDuplicate: false,
+    deductibleAnnualCents,
   };
 }
 
@@ -42,7 +44,6 @@ describe("adjudicateClaim — intra-claim accumulator folding", () => {
         line("a", "2026-03-01", 150000), // $1500
         line("b", "2026-03-02", 150000), // $1500 — only $500 of limit left after a
       ],
-      deductibleAnnualCents: 0,
       initialDeductibleMetByYear: {},
       initialBenefitUsedByYearService: {},
     });
@@ -62,13 +63,11 @@ describe("adjudicateClaim — intra-claim accumulator folding", () => {
   it("processes lines deterministically by (serviceDate, id) regardless of input order", () => {
     const ordered = adjudicateClaim({
       lines: [line("a", "2026-03-01", 150000), line("b", "2026-03-02", 150000)],
-      deductibleAnnualCents: 0,
       initialDeductibleMetByYear: {},
       initialBenefitUsedByYearService: {},
     });
     const reversed = adjudicateClaim({
       lines: [line("b", "2026-03-02", 150000), line("a", "2026-03-01", 150000)],
-      deductibleAnnualCents: 0,
       initialDeductibleMetByYear: {},
       initialBenefitUsedByYearService: {},
     });
@@ -88,11 +87,11 @@ describe("adjudicateClaim — intra-claim duplicate detection", () => {
       rule: ptCopay,
       coverageActive: true,
       isDuplicate: false,
+      deductibleAnnualCents: 0,
     });
 
     const res = adjudicateClaim({
       lines: [mk("a"), mk("b")],
-      deductibleAnnualCents: 0,
       initialDeductibleMetByYear: {},
       initialBenefitUsedByYearService: {},
     });
@@ -113,10 +112,9 @@ describe("adjudicateClaim — plan year keyed by service date", () => {
     // $600 annual deductible; two $500 lines, one in each year.
     const res = adjudicateClaim({
       lines: [
-        line("dec", "2025-12-20", 50000),
-        line("jan", "2026-01-05", 50000),
+        line("dec", "2025-12-20", 50000, ptFull, 60000),
+        line("jan", "2026-01-05", 50000, ptFull, 60000),
       ],
-      deductibleAnnualCents: 60000,
       initialDeductibleMetByYear: {},
       initialBenefitUsedByYearService: {},
     });
@@ -137,7 +135,6 @@ describe("adjudicateClaim — claim status rollup", () => {
   it("derives partially_approved from a mix of approved and limit-capped lines", () => {
     const res = adjudicateClaim({
       lines: [line("a", "2026-03-01", 150000), line("b", "2026-03-02", 150000)],
-      deductibleAnnualCents: 0,
       initialDeductibleMetByYear: {},
       initialBenefitUsedByYearService: {},
     });

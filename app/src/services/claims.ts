@@ -206,9 +206,61 @@ function toEngineRule(r: PrismaCoverageRule): CoverageRule {
   };
 }
 
-/** Policy effective window contains the service date (lexicographic on ISO dates). */
-function coverageActiveOn(serviceDate: string, from: string, to: string): boolean {
-  return from <= serviceDate && serviceDate <= to;
+/** Load a member's enrollments with their plan + coverage rules (reference data). */
+function loadMemberPolicies(memberId: string, db: DbClient = prisma) {
+  return db.policy.findMany({
+    where: { memberId },
+    include: { plan: { include: { coverageRules: true } } },
+  });
+}
+
+type MemberPolicy = Awaited<ReturnType<typeof loadMemberPolicies>>[number];
+
+interface ResolvedCoverage {
+  rule: PrismaCoverageRule | undefined;
+  coverageActive: boolean;
+  deductibleAnnualCents: number;
+}
+
+/**
+ * Resolve coverage for one line by its OWN service date (domain-model.md §2): the
+ * policy whose effective window contains the date governs it — coverage is derived
+ * from the date of service, not asserted by the submitter. The non-overlap invariant
+ * (createPolicy) guarantees at most one match; >1 is a loud invariant violation.
+ *
+ * If no policy is active on the date, the line is ineligible — but it's still
+ * classified by the member's most recent enrollment so a *known* service denies as
+ * COVERAGE_INACTIVE (gate 3) rather than INVALID_LINE (gate 1); pricing is moot since
+ * eligibility short-circuits before the money steps.
+ */
+function resolveLineCoverage(
+  policies: MemberPolicy[],
+  serviceDate: string,
+  serviceType: string,
+): ResolvedCoverage {
+  const active = policies.filter(
+    (p) => p.effectiveFrom <= serviceDate && serviceDate <= p.effectiveTo,
+  );
+  if (active.length > 1) {
+    throw new Error(
+      `coverage invariant violated: ${active.length} policies active on ${serviceDate}`,
+    );
+  }
+  const policy = active[0];
+  if (policy) {
+    return {
+      rule: policy.plan.coverageRules.find((r) => r.serviceType === serviceType),
+      coverageActive: true,
+      deductibleAnnualCents: policy.plan.deductibleAnnualCents,
+    };
+  }
+  const recentFirst = [...policies].sort((a, b) =>
+    b.effectiveTo.localeCompare(a.effectiveTo),
+  );
+  const rule = recentFirst
+    .map((p) => p.plan.coverageRules.find((r) => r.serviceType === serviceType))
+    .find((r) => r !== undefined);
+  return { rule, coverageActive: false, deductibleAnnualCents: 0 };
 }
 
 /**
@@ -261,14 +313,12 @@ export async function adjudicateClaim(claimId: string): Promise<ClaimView> {
     throw new ConflictError(`claim ${claimId} has already been adjudicated`);
   }
 
-  // Reference data (immutable): the member's policy → plan → coverage rules.
-  const policy = await prisma.policy.findFirst({
-    where: { memberId: claim.memberId },
-    include: { plan: { include: { coverageRules: true } } },
-  });
-  if (!policy) throw new NotFoundError(`no policy found for member ${claim.memberId}`);
-  const plan = policy.plan;
-  const ruleByService = new Map(plan.coverageRules.map((r) => [r.serviceType, r]));
+  // Reference data (immutable): the member's enrollments → plans → coverage rules.
+  // Each line resolves its OWN policy by service date (per-line, not one per claim).
+  const policies = await loadMemberPolicies(claim.memberId);
+  if (policies.length === 0) {
+    throw new NotFoundError(`no policy found for member ${claim.memberId}`);
+  }
 
   await prisma.$transaction(
     async (tx) => {
@@ -278,10 +328,10 @@ export async function adjudicateClaim(claimId: string): Promise<ClaimView> {
         data: { version: { increment: 1 } },
       });
 
-      // Gather per-line facts.
+      // Gather per-line facts — coverage resolved per line by its service date.
       const engineLines: ClaimLineForAdjudication[] = [];
       for (const l of claim.lineItems) {
-        const rule = ruleByService.get(l.serviceType);
+        const cov = resolveLineCoverage(policies, l.serviceDate, l.serviceType);
         engineLines.push({
           id: l.id,
           line: {
@@ -289,12 +339,9 @@ export async function adjudicateClaim(claimId: string): Promise<ClaimView> {
             serviceDate: l.serviceDate,
             billedAmountCents: l.billedAmountCents,
           },
-          ...(rule && { rule: toEngineRule(rule) }),
-          coverageActive: coverageActiveOn(
-            l.serviceDate,
-            policy.effectiveFrom,
-            policy.effectiveTo,
-          ),
+          ...(cov.rule && { rule: toEngineRule(cov.rule) }),
+          coverageActive: cov.coverageActive,
+          deductibleAnnualCents: cov.deductibleAnnualCents,
           isDuplicate: await hasDuplicate(tx, {
             memberId: claim.memberId,
             providerId: claim.providerId,
@@ -318,9 +365,9 @@ export async function adjudicateClaim(claimId: string): Promise<ClaimView> {
       }
 
       // Call the pure engine (folds the accumulator across the claim's lines).
+      // Deductible is per-line now (each line may sit under a different plan).
       const result = adjudicateClaimEngine({
         lines: engineLines,
-        deductibleAnnualCents: plan.deductibleAnnualCents,
         initialDeductibleMetByYear,
         initialBenefitUsedByYearService,
       });
@@ -505,22 +552,29 @@ export async function getMemberAccumulators(
   memberId: string,
   planYear: number,
 ): Promise<MemberAccumulatorsView> {
-  const policy = await prisma.policy.findFirst({
-    where: { memberId },
-    include: { plan: { include: { coverageRules: true } } },
-  });
-  if (!policy) throw new NotFoundError(`no policy found for member ${memberId}`);
+  const policies = await loadMemberPolicies(memberId);
+  if (policies.length === 0) throw new NotFoundError(`no policy found for member ${memberId}`);
+
+  // The displayed annual figures come from the plan enrolled during this year (the
+  // one starting latest within it); usage itself is summed from the ledger below.
+  const yearStart = `${planYear}-01-01`;
+  const yearEnd = `${planYear}-12-31`;
+  const inYear = policies
+    .filter((p) => p.effectiveFrom <= yearEnd && yearStart <= p.effectiveTo)
+    .sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom));
+  const fallback = [...policies].sort((a, b) => b.effectiveTo.localeCompare(a.effectiveTo));
+  const plan = (inYear[0] ?? fallback[0]!).plan;
 
   const acc = await loadAccumulators(memberId, planYear);
   const limitsByServiceType: Record<string, number> = {};
-  for (const r of policy.plan.coverageRules) {
+  for (const r of plan.coverageRules) {
     if (r.annualLimitCents !== null) limitsByServiceType[r.serviceType] = r.annualLimitCents;
   }
 
   return {
     memberId,
     planYear,
-    deductibleAnnualCents: policy.plan.deductibleAnnualCents,
+    deductibleAnnualCents: plan.deductibleAnnualCents,
     deductibleMetCents: acc.deductibleMetCents,
     benefitUsedByServiceType: acc.benefitUsedByServiceType,
     limitsByServiceType,
@@ -537,15 +591,16 @@ const DISPUTABLE: ReadonlySet<string> = new Set([
 interface LineContext {
   lineItem: LineItem;
   claim: Claim;
-  policy: { effectiveFrom: string; effectiveTo: string };
-  plan: { deductibleAnnualCents: number };
+  coverageActive: boolean;
+  deductibleAnnualCents: number;
   rule: PrismaCoverageRule | undefined;
 }
 
 /**
- * Load a line plus the reference data the engine needs to re-adjudicate it.
- * Pass the transaction client so the line's mutable status is read UNDER the member
- * lock (the resolve/review guards depend on this — see resolveDispute/reviewLine).
+ * Load a line plus the reference data the engine needs to re-adjudicate it, with
+ * coverage resolved by the line's OWN service date (same per-line rule as
+ * adjudicateClaim). Pass the transaction client so the line's mutable status is read
+ * UNDER the member lock (the resolve/review guards depend on this).
  */
 async function loadLineContext(
   lineItemId: string,
@@ -557,20 +612,18 @@ async function loadLineContext(
   });
   if (!lineItem) throw new NotFoundError(`line ${lineItemId} not found`);
 
-  const policy = await db.policy.findFirst({
-    where: { memberId: lineItem.claim.memberId },
-    include: { plan: { include: { coverageRules: true } } },
-  });
-  if (!policy) {
+  const policies = await loadMemberPolicies(lineItem.claim.memberId, db);
+  if (policies.length === 0) {
     throw new NotFoundError(`no policy found for member ${lineItem.claim.memberId}`);
   }
+  const cov = resolveLineCoverage(policies, lineItem.serviceDate, lineItem.serviceType);
 
   return {
     lineItem,
     claim: lineItem.claim,
-    policy,
-    plan: policy.plan,
-    rule: policy.plan.coverageRules.find((r) => r.serviceType === lineItem.serviceType),
+    coverageActive: cov.coverageActive,
+    deductibleAnnualCents: cov.deductibleAnnualCents,
+    rule: cov.rule,
   };
 }
 
@@ -585,7 +638,7 @@ async function rerunLineInTx(
   ctx: LineContext,
   overrides?: Override[],
 ): Promise<LineStatus> {
-  const { lineItem, claim, policy, plan, rule } = ctx;
+  const { lineItem, claim, rule } = ctx;
 
   await voidAccumulatorEntryForLine(lineItem.id, tx);
 
@@ -593,15 +646,12 @@ async function rerunLineInTx(
   const acc = await loadAccumulators(claim.memberId, year, tx);
 
   // Re-derive the SAME facts the engine saw at adjudication, so an overturn that
-  // supplies no override doesn't silently bypass a gate. Duplicate must be
-  // recomputed (like coverageActive) — it is only bypassed via ALLOW_DUPLICATE.
+  // supplies no override doesn't silently bypass a gate. coverageActive and the
+  // per-line deductible come from the line's resolved policy (ctx); duplicate is
+  // recomputed here — it is only bypassed via ALLOW_DUPLICATE.
   const adjCtx: AdjudicationContext = {
     ...(rule && { rule: toEngineRule(rule) }),
-    coverageActive: coverageActiveOn(
-      lineItem.serviceDate,
-      policy.effectiveFrom,
-      policy.effectiveTo,
-    ),
+    coverageActive: ctx.coverageActive,
     isDuplicate: await hasDuplicate(tx, {
       memberId: claim.memberId,
       providerId: claim.providerId,
@@ -610,7 +660,7 @@ async function rerunLineInTx(
       excludeClaimId: claim.id,
     }),
     accumulator: {
-      deductibleAnnualCents: plan.deductibleAnnualCents,
+      deductibleAnnualCents: ctx.deductibleAnnualCents,
       deductibleMetCents: acc.deductibleMetCents,
       benefitUsedCents: acc.benefitUsedByServiceType[lineItem.serviceType] ?? 0,
     },

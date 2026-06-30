@@ -48,6 +48,31 @@ belong to the Plan, so they're shared across members rather than copied per pers
 plan pay" (Plan). An earlier draft conflated the two onto `Policy`; the split was made
 after a domain pass.
 
+### Coverage is resolved **per line, by date of service** — not asserted on submit
+The submit payload carries `memberId`/`providerId` but **no `policyId`**: which
+enrollment applies is *derived* from the service date, not chosen by the submitter (a
+claimant must not be able to pick the more favorable coverage). Each line resolves the
+policy whose effective window contains *its own* `serviceDate`, so a claim that straddles
+a renewal adjudicates each line under the plan that was actually in force — rules and the
+annual deductible both come from that line's plan (the engine's deductible is therefore
+per-line). An earlier `findFirst`-by-member picked an arbitrary enrollment; that bug is
+what surfaced this. A line whose date falls in **no** window is `COVERAGE_INACTIVE`
+(classified by the member's most recent enrollment so a *known* service denies on
+eligibility, not as an unknown service); a member with **zero** policies is a 404.
+
+### Single active coverage — **non-overlapping** policy windows per member (invariant)
+A member holds at most one policy active on any given date, so per-line resolution is
+unambiguous. Enforced at the policy **write boundary** (`createPolicy` rejects an
+overlapping window, inclusive boundaries) since SQLite can't express a range-exclusion
+constraint; on Postgres this is an `EXCLUDE USING gist` constraint (same portability seam
+as `SELECT … FOR UPDATE`). The resolver also fails loud if it ever sees >1 active policy,
+converting a silent arbitrary-pick into an error. **Cut: coordination of benefits (COB).**
+Real members can hold simultaneous primary+secondary coverage with a payment order; that's
+excluded here for the same reason as subscriber/dependent and group sponsor — enrollment
+complexity without new adjudication insight. *Limitation:* within one plan year a mid-year
+policy change shares the deductible accumulator (no deductible-credit reset), since the
+ledger is keyed by year, not policy.
+
 ### Usage is tracked as a **ledger**, not a mutable counter
 Each finalized line writes one `AccumulatorEntry`; `deductibleMet` / `benefitUsed` are
 the **sum of active (non-voided) entries**. Chosen over a single mutable total because:
