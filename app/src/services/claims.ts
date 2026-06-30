@@ -642,6 +642,14 @@ export async function disputeLine(
       `line ${lineItemId} is not disputable (status: ${lineItem.status})`,
     );
   }
+  // One dispute per line (decisions.md): re-appeals are out of scope. Pre-check so
+  // a second dispute is a clean 409, not a raw unique-constraint violation (500).
+  const existing = await prisma.dispute.findUnique({ where: { lineItemId } });
+  if (existing) {
+    throw new ConflictError(
+      `line ${lineItemId} already has a dispute (status: ${existing.status})`,
+    );
+  }
 
   await prisma.$transaction(async (tx) => {
     await tx.dispute.create({

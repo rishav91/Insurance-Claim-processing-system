@@ -152,6 +152,7 @@ Each of these is a conscious trade-off; none is an accident.
 | **`deductibleExempt` (first-dollar coverage)** | Preventive 100%-no-deductible is a flag away; the "neither = 0%" rule covers full coverage *after* deductible. | One boolean on the rule + a skip in step 7. |
 | **Timely-filing limits** | Rejecting late-filed claims is a date check unrelated to adjudication depth. | A submission-date vs service-date guard. |
 | **Disputes on `paid` lines** | Clawback / supplemental payment needs a money-ledger we don't model; disputes target denials/partials (all pre-payment), so the common case is covered. | A disbursement ledger + adjustment records. |
+| **Re-dispute (multiple appeals per line)** | **One dispute per line** (`Dispute.lineItemId` is unique). A second dispute is a clean `409`, not a 500. One appeal cycle exercises the full reconciliation path; multi-level appeals add an appeal-history entity without new adjudication depth. | Drop the unique constraint → a `Dispute[]` history per line (mirrors the ledger's "one active + audit copies" model) + gate on "no *open* dispute." |
 | **Cross-claim cascade re-adjudication** | See §7 — accepted limitation, not a missing feature. | Dependency tracking across claims + re-run orchestration. |
 | **Override types beyond 3** | The full taxonomy is *defined* in the model; `WAIVE_LIMIT`/`MARK_ELIGIBLE`/`WAIVE_DEDUCTIBLE` prove both shapes (boolean + parameterized). | The remaining gates follow the identical pattern. |
 | **Auth / registration / multi-tenant** | Explicitly out of scope per the prompt. | — |
