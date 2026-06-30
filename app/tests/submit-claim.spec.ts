@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { resetDb } from "./db/reset.js";
 import { seedScenario } from "./helpers/seed.js";
 import { getClaim, submitClaim } from "../src/services/claims.js";
+import { ValidationError } from "../src/services/errors.js";
 
 beforeEach(resetDb);
 
@@ -39,5 +40,20 @@ describe("submitClaim + getClaim (roadmap Phase 3)", () => {
 
   it("returns null from getClaim for an unknown id", async () => {
     expect(await getClaim("does-not-exist")).toBeNull();
+  });
+
+  it("rejects a line with a malformed serviceDate (would mis-bucket the accumulator)", async () => {
+    const { member, provider } = await seedScenario({
+      rules: [{ serviceType: "PT", coinsuranceRate: 0 }],
+    });
+    await expect(
+      submitClaim({
+        memberId: member.id,
+        providerId: provider.id,
+        lines: [
+          { serviceType: "PT", serviceDate: "03/01/2026", billedAmountCents: 50_000 },
+        ],
+      }),
+    ).rejects.toBeInstanceOf(ValidationError);
   });
 });
