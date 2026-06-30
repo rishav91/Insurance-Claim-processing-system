@@ -4,6 +4,7 @@ import { seedScenario } from "./helpers/seed.js";
 import {
   adjudicateClaim,
   disputeLine,
+  getClaim,
   resolveDispute,
   submitClaim,
 } from "../src/services/claims.js";
@@ -25,21 +26,27 @@ async function adjudicatedClaim(
 }
 
 describe("disputeLine (roadmap Phase 4)", () => {
-  it("moves a denied line to disputed, re-derives the claim to under_review, appends DISPUTED", async () => {
+  it("returns the created dispute and re-derives the claim to under_review (DISPUTED)", async () => {
     const { member, provider } = await seedScenario({
       rules: [{ serviceType: "COSMETIC", excluded: true }],
     });
-    const { lineId } = await adjudicatedClaim(member.id, provider.id, {
+    const { lineId, view } = await adjudicatedClaim(member.id, provider.id, {
       serviceType: "COSMETIC",
       serviceDate: "2026-03-01",
       billedAmountCents: 50_000,
     });
 
-    const view = await disputeLine(lineId, "I believe this should be covered");
+    // The dispute endpoint returns the created dispute directly — no second read.
+    const dispute = await disputeLine(lineId, "I believe this should be covered");
+    expect(dispute.status).toBe("open");
+    expect(dispute.reason).toBe("I believe this should be covered");
+    expect(dispute.lineItemId).toBe(lineId);
 
-    expect(view.lineItems[0]!.status).toBe("disputed");
-    expect(view.status).toBe("under_review");
-    expect(view.events.map((e) => e.type)).toContain("DISPUTED");
+    // The claim re-derives to under_review with a DISPUTED event in its timeline.
+    const claim = (await getClaim(view.id))!;
+    expect(claim.lineItems[0]!.status).toBe("disputed");
+    expect(claim.status).toBe("under_review");
+    expect(claim.events.map((e) => e.type)).toContain("DISPUTED");
   });
 
   it("refuses to dispute a line that already has a dispute (409, one per line)", async () => {
