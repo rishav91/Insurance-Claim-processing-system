@@ -1,8 +1,14 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { resetDb } from "./db/reset.js";
 import { seedScenario } from "./helpers/seed.js";
-import { adjudicateClaim, reviewLine, submitClaim } from "../src/services/claims.js";
+import {
+  adjudicateClaim,
+  getClaim,
+  reviewLine,
+  submitClaim,
+} from "../src/services/claims.js";
 import { loadAccumulators } from "../src/db/repositories.js";
+import { ConflictError } from "../src/services/errors.js";
 
 beforeEach(resetDb);
 
@@ -51,5 +57,38 @@ describe("reviewLine — manual-review resolution (roadmap Phase 4)", () => {
 
     const acc = await loadAccumulators(member.id, 2026);
     expect(acc.benefitUsedByServiceType["SURGERY"]).toBeUndefined();
+  });
+
+  it("serializes two concurrent reviews of one pended line: one wins, one 409s", async () => {
+    const { member, provider } = await seedScenario({
+      rules: [{ serviceType: "SURGERY", coinsuranceRate: 0, requiresManualReview: true }],
+    });
+    const submitted = await submitClaim({
+      memberId: member.id,
+      providerId: provider.id,
+      lines: [
+        { serviceType: "SURGERY", serviceDate: "2026-03-01", billedAmountCents: 100_000 },
+      ],
+    });
+    const adj = await adjudicateClaim(submitted.id);
+    const lineId = adj.lineItems[0]!.id;
+    expect(adj.lineItems[0]!.status).toBe("pended");
+
+    const results = await Promise.allSettled([
+      reviewLine(lineId, "approve", { note: "necessary" }),
+      reviewLine(lineId, "approve", { note: "necessary" }),
+    ]);
+
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(ConflictError);
+
+    // The pended→approved transition happened exactly once.
+    const claim = (await getClaim(submitted.id))!;
+    expect(claim.events.filter((e) => e.type === "RESOLVED")).toHaveLength(1);
+    const accAfter = await loadAccumulators(member.id, 2026);
+    expect(accAfter.benefitUsedByServiceType["SURGERY"]).toBe(100_000); // not doubled
   });
 });

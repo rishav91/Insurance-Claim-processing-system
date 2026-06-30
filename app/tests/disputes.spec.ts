@@ -240,3 +240,40 @@ describe("resolveDispute — uphold (roadmap Phase 4)", () => {
     expect(acc.benefitUsedByServiceType["PT"]).toBe(120_000); // unchanged
   });
 });
+
+describe("resolveDispute — concurrency (hardening, TOCTOU)", () => {
+  it("serializes two concurrent resolves of one dispute: exactly one wins, one 409s", async () => {
+    const { member, provider } = await seedScenario({
+      rules: [{ serviceType: "PT", coinsuranceRate: 0, annualLimitCents: 200_000 }],
+    });
+    // Claim 1 exhausts the limit; claim 2's line is denied (limit-exhausted), so an
+    // overturn with WAIVE_LIMIT does real ledger work — a double-resolve would emit
+    // two RESOLVED events for one dispute.
+    await adjudicatedClaim(member.id, provider.id, {
+      serviceType: "PT",
+      serviceDate: "2026-03-01",
+      billedAmountCents: 200_000,
+    });
+    const { lineId, view } = await adjudicatedClaim(member.id, provider.id, {
+      serviceType: "PT",
+      serviceDate: "2026-04-01",
+      billedAmountCents: 100_000,
+    });
+    const dispute = await disputeLine(lineId, "please reconsider");
+
+    const results = await Promise.allSettled([
+      resolveDispute(dispute.id, "overturn", { overrides: [{ type: "WAIVE_LIMIT" }] }),
+      resolveDispute(dispute.id, "overturn", { overrides: [{ type: "WAIVE_LIMIT" }] }),
+    ]);
+
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(ConflictError);
+
+    // Exactly one RESOLVED event — the loser never re-ran the engine.
+    const claim = (await getClaim(view.id))!;
+    expect(claim.events.filter((e) => e.type === "RESOLVED")).toHaveLength(1);
+  });
+});
