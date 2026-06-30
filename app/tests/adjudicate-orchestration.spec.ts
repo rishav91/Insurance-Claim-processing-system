@@ -3,6 +3,7 @@ import { resetDb } from "./db/reset.js";
 import { seedScenario } from "./helpers/seed.js";
 import { adjudicateClaim, submitClaim } from "../src/services/claims.js";
 import { loadAccumulators } from "../src/db/repositories.js";
+import { ConflictError } from "../src/services/errors.js";
 
 beforeEach(resetDb);
 
@@ -131,6 +132,30 @@ describe("adjudicateClaim — eligibility & manual review (fact gathering)", () 
 });
 
 describe("adjudicateClaim — serialization invariant", () => {
+  it("concurrent adjudicateClaim on the SAME claim: one wins, one 409s, no duplicate ledger entries", async () => {
+    const { member, provider } = await seedScenario({
+      rules: [{ serviceType: "PT", coinsuranceRate: 0, annualLimitCents: 200_000 }],
+    });
+
+    const c = await submitClaim({
+      memberId: member.id,
+      providerId: provider.id,
+      lines: [{ serviceType: "PT", serviceDate: "2026-03-01", billedAmountCents: 50_000 }],
+    });
+
+    const results = await Promise.allSettled([adjudicateClaim(c.id), adjudicateClaim(c.id)]);
+
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(ConflictError);
+
+    // The ledger must not double-count: exactly $500 written once, not $1000.
+    const acc = await loadAccumulators(member.id, 2026);
+    expect(acc.benefitUsedByServiceType["PT"]).toBe(50_000);
+  });
+
   it("concurrent claims for one member do not overspend a shared annual limit", async () => {
     const { member, provider } = await seedScenario({
       rules: [{ serviceType: "PT", coinsuranceRate: 0, annualLimitCents: 200_000 }],

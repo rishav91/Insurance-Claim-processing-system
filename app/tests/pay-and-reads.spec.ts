@@ -9,6 +9,7 @@ import {
   listClaims,
   payClaim,
   submitClaim,
+  type ClaimView,
 } from "../src/services/claims.js";
 import { ConflictError } from "../src/services/errors.js";
 
@@ -70,6 +71,30 @@ describe("payClaim (roadmap Phase 5)", () => {
 
     // Re-paying must not clobber paidAmountCents — it is terminal.
     await expect(payClaim(submitted.id)).rejects.toBeInstanceOf(ConflictError);
+  });
+
+  it("concurrent payClaim on the SAME claim: one wins, one 409s, exactly one PAID event", async () => {
+    const { member, provider } = await seedScenario({
+      rules: [{ serviceType: "PT", coinsuranceRate: 0 }],
+    });
+    const submitted = await submitClaim({
+      memberId: member.id,
+      providerId: provider.id,
+      lines: [{ serviceType: "PT", serviceDate: "2026-03-01", billedAmountCents: 50_000 }],
+    });
+    await adjudicateClaim(submitted.id);
+
+    const results = await Promise.allSettled([payClaim(submitted.id), payClaim(submitted.id)]);
+
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(ConflictError);
+
+    // Exactly one PAID event — a double-commit would write two.
+    const view = (fulfilled[0] as PromiseFulfilledResult<ClaimView>).value;
+    expect(view.events.filter((e) => e.type === "PAID")).toHaveLength(1);
   });
 
   it("rejects paying a claim that is not in a payable state (409)", async () => {
