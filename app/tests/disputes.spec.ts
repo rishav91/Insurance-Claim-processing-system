@@ -9,6 +9,7 @@ import {
 } from "../src/services/claims.js";
 import { loadAccumulators } from "../src/db/repositories.js";
 import { prisma } from "../src/db/client.js";
+import { ConflictError } from "../src/services/errors.js";
 
 beforeEach(resetDb);
 
@@ -39,6 +40,24 @@ describe("disputeLine (roadmap Phase 4)", () => {
     expect(view.lineItems[0]!.status).toBe("disputed");
     expect(view.status).toBe("under_review");
     expect(view.events.map((e) => e.type)).toContain("DISPUTED");
+  });
+
+  it("refuses to dispute a line that already has a dispute (409, one per line)", async () => {
+    const { member, provider } = await seedScenario({
+      rules: [{ serviceType: "PT", coinsuranceRate: 0 }],
+    });
+    const { lineId } = await adjudicatedClaim(member.id, provider.id, {
+      serviceType: "PT",
+      serviceDate: "2026-03-01",
+      billedAmountCents: 50_000,
+    });
+
+    await disputeLine(lineId, "first appeal");
+    await resolveDispute(lineId, "uphold");
+
+    await expect(disputeLine(lineId, "second appeal")).rejects.toBeInstanceOf(
+      ConflictError,
+    );
   });
 
   it("refuses to dispute a paid line (terminal)", async () => {
