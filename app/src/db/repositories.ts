@@ -11,6 +11,7 @@ import type {
   Provider,
 } from "@prisma/client";
 import { prisma } from "./client.js";
+import { ValidationError } from "../services/errors.js";
 
 export type PlanWithRules = Prisma.PlanGetPayload<{ include: { coverageRules: true } }>;
 export type ClaimWithLines = Prisma.ClaimGetPayload<{ include: { lineItems: true } }>;
@@ -80,12 +81,40 @@ export function getPlanWithRules(planId: string): Promise<PlanWithRules | null> 
   });
 }
 
-export function createPolicy(data: {
+/** Two inclusive ISO-date windows overlap iff each starts on/before the other ends. */
+function windowsOverlap(
+  a: { from: string; to: string },
+  b: { from: string; to: string },
+): boolean {
+  return a.from <= b.to && b.from <= a.to;
+}
+
+/**
+ * Enforce the single-active-coverage invariant (decisions.md): a member's policy
+ * windows must not overlap, so any service date resolves to at most one enrollment.
+ * SQLite can't express a range-exclusion constraint, so the rule is upheld here at
+ * the write boundary (the seed path). On Postgres this would be an `EXCLUDE` constraint.
+ */
+export async function createPolicy(data: {
   memberId: string;
   planId: string;
   effectiveFrom: string;
   effectiveTo: string;
 }): Promise<Policy> {
+  const existing = await prisma.policy.findMany({ where: { memberId: data.memberId } });
+  const clash = existing.find((p) =>
+    windowsOverlap(
+      { from: data.effectiveFrom, to: data.effectiveTo },
+      { from: p.effectiveFrom, to: p.effectiveTo },
+    ),
+  );
+  if (clash) {
+    throw new ValidationError(
+      `policy window ${data.effectiveFrom}..${data.effectiveTo} overlaps existing ` +
+        `policy ${clash.id} (${clash.effectiveFrom}..${clash.effectiveTo}) for member ${data.memberId}`,
+      [{ path: "effectiveFrom", issue: "overlaps an existing policy window for this member" }],
+    );
+  }
   return prisma.policy.create({ data });
 }
 
