@@ -369,6 +369,13 @@ snapshot of totals and emits a delta. The only difference is at the boundary: th
 snapshot is **summed from the ledger** at the start, and each line's delta is
 **written as a new `AccumulatorEntry`** at the end, rather than mutating a stored total.
 
+The same fold also enforces **intra-claim duplicates**: a line whose
+`(serviceType, serviceDate)` matches an earlier *non-denied* line in the same claim is
+marked duplicate (gate 4) — so a non-limited service (e.g. a flat copay with no annual
+limit) billed twice on one claim is denied `DUPLICATE` on the second line, not paid
+twice. Provider is claim-level, so it isn't part of the intra-claim key; cross-claim
+duplicate detection (which keys on provider) stays in the orchestration layer.
+
 Why this matters (the reviewer's blocker case): a claim with **two `PT` lines** each
 wanting $1500 against a `remainingLimit` of $2000. Folding means line 1 consumes
 $1500, line 2 sees `remaining = 500` → pays $500, denies $1000. Total paid $2000,

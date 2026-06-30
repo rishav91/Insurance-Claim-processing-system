@@ -54,14 +54,23 @@ export function adjudicateClaim(input: ClaimAdjudicationInput): ClaimAdjudicatio
 
   const byId = new Map<string, AdjudicationResult>();
 
+  // Keys of earlier lines in THIS claim that adjudicated to a non-denied outcome.
+  // A later line with the same (serviceType, serviceDate) is an intra-claim
+  // duplicate (provider is claim-level, so it isn't part of the key). This catches
+  // a non-limited service billed twice on one claim, which the fold alone misses.
+  const seenNonDeniedKeys = new Set<string>();
+  const dupKey = (serviceType: string, serviceDate: string): string =>
+    `${serviceType}:${serviceDate}`;
+
   for (const cl of ordered) {
     const year = planYearOf(cl.line.serviceDate);
     const bKey = benefitKey(year, cl.line.serviceType);
+    const key = dupKey(cl.line.serviceType, cl.line.serviceDate);
 
     const result = adjudicateLine(cl.line, {
       rule: cl.rule,
       coverageActive: cl.coverageActive,
-      isDuplicate: cl.isDuplicate,
+      isDuplicate: cl.isDuplicate || seenNonDeniedKeys.has(key),
       accumulator: {
         deductibleAnnualCents: input.deductibleAnnualCents,
         deductibleMetCents: dedMet[year] ?? 0,
@@ -73,6 +82,10 @@ export function adjudicateClaim(input: ClaimAdjudicationInput): ClaimAdjudicatio
     // Fold this line's delta forward so later lines in the same claim see it.
     dedMet[year] = (dedMet[year] ?? 0) + result.accumulatorDelta.deductibleMetCents;
     benUsed[bKey] = (benUsed[bKey] ?? 0) + result.accumulatorDelta.benefitUsedCents;
+
+    // Only a non-denied line "claims" the key — a hard-denied first line shouldn't
+    // make an otherwise-valid later line a duplicate.
+    if (result.outcome !== "denied") seenNonDeniedKeys.add(key);
 
     byId.set(cl.id, result);
   }
