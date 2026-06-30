@@ -32,18 +32,28 @@ appeals, cascading re-adjudication across claims.
 
 ## 2. Entities & relationships
 
+```mermaid
+erDiagram
+    PLAN              ||--o{ COVERAGE_RULE     : "owns (benefit design)"
+    PLAN              ||--o{ POLICY            : "enrolled via"
+    MEMBER            ||--o{ POLICY            : "holds (enrollment)"
+    MEMBER            ||--o{ CLAIM             : "files"
+    PROVIDER          ||--o{ CLAIM             : "renders"
+    CLAIM             ||--|{ LINE_ITEM         : "contains 1..*"
+    LINE_ITEM         ||--|| ADJUDICATION      : "embeds (money result)"
+    LINE_ITEM         ||--o| DISPUTE           : "may have 0..1"
+    LINE_ITEM         ||--o{ ACCUMULATOR_ENTRY : "writes (1 active + voided audit copies)"
+    MEMBER            ||--o{ ACCUMULATOR_ENTRY : "usage counts against"
+    CLAIM             ||--o{ EVENT             : "append-only audit log"
+    LINE_ITEM         ||--o{ EVENT             : "line-level events"
 ```
-Plan 1──* CoverageRule          Member 1───* Claim *───1 Provider
-  │                                │            │
-  │ 1  (benefit design)           │ 1          │ 1
-  *                               │            *
-Policy *──1 Member  (enrollment)  │         LineItem ──1── Adjudication (embedded)
-                                  │            │ 0..1   │ 1
-                                  │         Dispute      *
-                                  *                   AccumulatorEntry (ledger)
-                              (Claim/Line)Event           per finalized line
-                               append-only audit log
-```
+
+> **Reading the diagram.** A **Plan** owns its `CoverageRule`s and is enrolled in by
+> many `Policy` rows; a **Policy** ties one `Member` to one `Plan` over an effective
+> window. A `Claim` belongs to a `Member` + `Provider` and holds 1..* `LineItem`s,
+> each with an embedded `Adjudication`, an optional `Dispute`, and one *active*
+> `AccumulatorEntry` (plus voided audit copies). `Event` is the append-only log,
+> keyed to the `Claim` and optionally a `LineItem`.
 
 Two things changed from the first draft, after a domain pass:
 - **Plan vs Policy** are split. A **Plan** is the reusable *benefit design* (the
@@ -223,6 +233,26 @@ One row per state transition, never updated or deleted:
 All amounts are **integer cents**. Every operation **clamps to ≥ 0** so cost-share
 can never exceed the base and payable can never go negative.
 
+```mermaid
+flowchart TD
+    A["billed — provider charge"] --> B["allowed = min(billed, feeSchedule?)<br/>ALLOWED_REDUCED if reduced"]
+    B --> C["deductibleApplied = min(allowed, remainingDeductible)<br/>clamp ≥ 0 → member"]
+    C --> D["costShareBase = allowed − deductibleApplied<br/>clamp ≥ 0"]
+    D --> E{copay or coinsurance?}
+    E -->|copay rule| F["memberCostShare = min(copayCents, costShareBase)"]
+    E -->|coinsurance rule| G["memberCostShare = round(rate × costShareBase)"]
+    E -->|neither| H["memberCostShare = 0<br/>100% after deductible"]
+    F --> I["payableBeforeLimit = costShareBase − memberCostShare<br/>clamp ≥ 0"]
+    G --> I
+    H --> I
+    I --> J["payable = min(payableBeforeLimit, remainingAnnualLimit)<br/>clamp ≥ 0"]
+    J --> K["limitDeniedExcess = payableBeforeLimit − payable"]
+    J --> L["memberResponsibility = allowed − payable"]
+    L --> M(["invariant: payable + memberResponsibility == allowed"])
+```
+
+The exact arithmetic the diagram summarizes:
+
 ```
 billed                       what the provider charged
 allowed   = min(billed, feeSchedule?)         (ALLOWED_REDUCED if reduced)
@@ -266,16 +296,28 @@ flavors differ, and this distinction is deliberate:
 
 ### Line item
 
-```
-                 ┌─────────────────────────────► denied
-                 │                                  ▲
-  submitted ─► (adjudicate) ─► approved             │
-                 │           ─► partially_approved   │ (overturn)
-                 │           ─► denied ──────────────┘
-                 └─► pended ─► (review) ─► approved | denied
+```mermaid
+stateDiagram-v2
+    [*] --> submitted
+    submitted --> approved : adjudicate
+    submitted --> partially_approved : adjudicate
+    submitted --> denied : adjudicate
+    submitted --> pended : adjudicate (requiresManualReview)
 
-  approved | partially_approved | denied ─► disputed ─► (resolve) ─► approved | partially_approved | denied
-  approved / partially_approved ─► paid   (TERMINAL — not disputable, see below)
+    pended --> approved : review (approve)
+    pended --> denied : review (deny)
+
+    approved --> disputed : dispute
+    partially_approved --> disputed : dispute
+    denied --> disputed : dispute
+
+    disputed --> approved : resolve (overturn/uphold)
+    disputed --> partially_approved : resolve
+    disputed --> denied : resolve
+
+    approved --> paid : pay
+    partially_approved --> paid : pay
+    paid --> [*] : TERMINAL — not disputable
 ```
 
 - **approved** — fully covered (member may still owe deductible/copay; still "approved").
@@ -293,11 +335,30 @@ flavors differ, and this distinction is deliberate:
 
 ### Claim — **derived** from its line items (never set directly)
 
+```mermaid
+stateDiagram-v2
+    [*] --> submitted
+    submitted --> under_review : any line pended/disputed
+    submitted --> approved : all lines approved
+    submitted --> partially_approved : mix of approved/partial/denied
+    submitted --> denied : all lines denied
+
+    under_review --> approved : resolved, all approved
+    under_review --> partially_approved : resolved, mixed
+    under_review --> denied : resolved, all denied
+
+    approved --> under_review : a non-paid line disputed
+    partially_approved --> under_review : a non-paid line disputed
+    denied --> under_review : a denied line disputed
+
+    approved --> paid : pay
+    partially_approved --> paid : pay
+    paid --> [*] : terminal
 ```
-submitted ─► under_review ─► approved | partially_approved | denied ─► paid
-                         ▲                                              (terminal)
-                         └── a non-paid line disputed → back to under_review
-```
+
+> Every arrow above is a **re-derivation**, not a stored mutation — `deriveClaimStatus`
+> recomputes the claim status from the current line-state multiset after any line
+> transition (precedence rules below).
 
 Claim status is a **total pure function** `deriveClaimStatus(lineStates[]) →
 ClaimStatus`, evaluated by **first matching precedence rule** (top wins):
@@ -309,6 +370,22 @@ ClaimStatus`, evaluated by **first matching precedence rule** (top wins):
 | 3 | **all** lines `denied` | `denied` |
 | 4 | **all** lines `approved` (none denied/partial) | `approved` |
 | 5 | otherwise (any mix of approved / partially_approved / denied) | `partially_approved` |
+
+The same first-match cascade as a decision tree (top rule wins, evaluation stops at
+the first `yes`):
+
+```mermaid
+flowchart TD
+    S["line-state multiset"] --> R1{"1 · any pended<br/>or disputed?"}
+    R1 -->|yes| UR([under_review])
+    R1 -->|no| R2{"2 · all paid or denied,<br/>≥ 1 paid?"}
+    R2 -->|yes| PD([paid])
+    R2 -->|no| R3{3 · all denied?}
+    R3 -->|yes| DN([denied])
+    R3 -->|no| R4{4 · all approved?}
+    R4 -->|yes| AP([approved])
+    R4 -->|no| PA([5 · partially_approved])
+```
 
 Notes that close the reviewer's edge cases:
 - **All-pended** falls under rule 1 → `under_review` (correctly "nothing decided yet").
@@ -364,6 +441,27 @@ adjudicateClaim(claim):
   persist: one AccumulatorEntry per finalized line + line results, atomically
 ```
 
+The same flow as a transaction timeline — note the **fold** inside the loop and the
+single atomic write at the end:
+
+```mermaid
+sequenceDiagram
+    participant O as adjudicateClaim (orchestration)
+    participant DB as Ledger (DB)
+    participant E as adjudicateLine (pure engine)
+
+    O->>DB: lock member/policy row
+    Note over O,DB: serialization point (§ ledger)
+    O->>DB: sum active AccumulatorEntry rows (member, planYear)
+    DB-->>O: acc snapshot — all prior claims
+    loop each line in (serviceDate ASC, id ASC) order
+        O->>E: adjudicateLine(line, rule, snapshot(acc), overrides)
+        E-->>O: result + accumulatorDelta
+        Note over O: acc += delta — fold forward (in-flight)
+    end
+    O->>DB: persist 1 AccumulatorEntry per finalized line + results (atomic)
+```
+
 The in-memory `acc` fold is unchanged by the ledger model — the engine still reads a
 snapshot of totals and emits a delta. The only difference is at the boundary: the
 snapshot is **summed from the ledger** at the start, and each line's delta is
@@ -383,6 +481,31 @@ never exceeding the cap. The same fold protects the shared deductible. Without
 folding both lines would read $2000/full-deductible and overspend. **Spec'd in §7.**
 
 Order (short-circuits on a terminal denial):
+
+```mermaid
+flowchart TD
+    L["line + rule + accSnapshot"] --> G1{"1 · valid and<br/>known serviceType?"}
+    G1 -->|no| D1([denied · INVALID_LINE])
+    G1 -->|yes| G2{"2 · rule.excluded?<br/>FORCE_COVERED overrides"}
+    G2 -->|excluded| D2([denied · SERVICE_EXCLUDED])
+    G2 -->|no| G3{"3 · coverage active<br/>on serviceDate?<br/>MARK_ELIGIBLE overrides"}
+    G3 -->|no| D3([denied · COVERAGE_INACTIVE])
+    G3 -->|yes| G4{"4 · duplicate of prior<br/>non-denied line?<br/>ALLOW_DUPLICATE overrides"}
+    G4 -->|duplicate| D4([denied · DUPLICATE])
+    G4 -->|no| G5{"5 · requiresManualReview?<br/>skipManualReview overrides"}
+    G5 -->|yes| P([pended · PENDED_FOR_REVIEW])
+    G5 -->|no| M6["6 · allowed = min(billed, feeSchedule)<br/>ALLOWED_REDUCED · OVERRIDE_ALLOWED_AMOUNT"]
+    M6 --> M7["7 · apply deductible<br/>DEDUCTIBLE_APPLIED · WAIVE_DEDUCTIBLE"]
+    M7 --> M8["8 · copay XOR coinsurance<br/>COPAY / COINSURANCE_APPLIED"]
+    M8 --> G9{"9 · within remaining<br/>annual limit?<br/>WAIVE_LIMIT overrides"}
+    G9 -->|fully| OK([approved · COVERED])
+    G9 -->|partially| PP(["partially_approved<br/>PARTIALLY_PAID + LIMIT_EXHAUSTED"])
+    G9 -->|none left| DL([denied · LIMIT_EXHAUSTED])
+```
+
+Gates **1–4 are hard denials** that short-circuit (no money, no accumulator effect),
+gate **5 pends** for a human, and gates **6–9 compute money**. The dotted-italic notes
+mark which **override** lets a reviewer bypass that gate (§ override taxonomy).
 
 | # | Step | Outcome on failure | Reason code |
 |---|---|---|---|
@@ -455,6 +578,29 @@ resolve(lineItem, action, override?):
   else:                     re-run adjudicateLine(line, rule, snapshot(acc), override)
                             write a fresh AccumulatorEntry for the new delta
   re-derive parent claim status; append a RESOLVED event
+```
+
+The single reconciliation path as a timeline — the **void → re-run → write fresh**
+sequence that replaces reverse-then-reapply arithmetic:
+
+```mermaid
+sequenceDiagram
+    participant R as resolve (review / dispute)
+    participant DB as Ledger (DB)
+    participant E as adjudicateLine (pure engine)
+
+    R->>DB: lock member/policy row
+    Note over R,DB: same serialization point as submit
+    R->>DB: void line's prior AccumulatorEntry (if any)
+    Note over DB: voided entry kept as audit record
+    alt action == deny (or uphold a denial)
+        Note over R: outcome = denied, payable = 0 — no new entry
+    else approve / overturn
+        R->>E: re-run adjudicateLine(line, rule, snapshot(acc), overrides)
+        E-->>R: new result + delta
+        R->>DB: write a fresh AccumulatorEntry for the new delta
+    end
+    R->>DB: re-derive parent claim status; append RESOLVED event
 ```
 
 With the ledger, "reverse then reapply" becomes **void the old entry, write a new

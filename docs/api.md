@@ -51,14 +51,30 @@ Transport/validation failures (4xx/5xx) return:
 
 ## Lifecycle ↔ endpoint map
 
+```mermaid
+stateDiagram-v2
+    [*] --> submitted : POST /claims
+    submitted --> under_review : POST /claims/:id/adjudicate
+    submitted --> approved : POST /claims/:id/adjudicate
+    submitted --> partially_approved : POST /claims/:id/adjudicate
+    submitted --> denied : POST /claims/:id/adjudicate
+
+    approved --> under_review : POST /lineitems/:id/dispute
+    partially_approved --> under_review : POST /lineitems/:id/dispute
+    denied --> under_review : POST /lineitems/:id/dispute
+
+    under_review --> approved : resolve / review
+    under_review --> partially_approved : resolve / review
+    under_review --> denied : resolve / review
+
+    approved --> paid : POST /claims/:id/pay
+    partially_approved --> paid : POST /claims/:id/pay
+    paid --> [*]
 ```
-POST /claims            submitted
-POST /claims/:id/adjudicate   → under_review | approved | partially_approved | denied
-POST /claims/:id/pay          → paid                     (from approved/partially_approved)
-POST /lineitems/:id/dispute   line → disputed (claim → under_review)
-POST /disputes/:id/resolve    line → approved|partially_approved|denied (claim re-derives)
-POST /lineitems/:id/review    pended line → approved|denied (claim re-derives)
-```
+
+> `resolve` = `POST /disputes/:id/resolve`; `review` = `POST /lineitems/:id/review`
+> (pended lines). Every post-transition status is **re-derived** from the line items,
+> never set by the endpoint.
 
 Claim status is always **derived** from its line items (domain-model.md §4); no endpoint
 sets it directly.
