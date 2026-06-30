@@ -56,4 +56,21 @@ describe("submitClaim + getClaim (roadmap Phase 3)", () => {
       }),
     ).rejects.toBeInstanceOf(ValidationError);
   });
+
+  it("rejects a calendar-impossible serviceDate that the regex would pass (2026-02-30)", async () => {
+    const { member, provider } = await seedScenario({
+      rules: [{ serviceType: "PT", coinsuranceRate: 0 }],
+    });
+    // Shape is YYYY-MM-DD, but Feb 30 doesn't exist — `new Date` would silently roll
+    // it to Mar 2, mis-bucketing eligibility / the accumulator plan-year.
+    await expect(
+      submitClaim({
+        memberId: member.id,
+        providerId: provider.id,
+        lines: [
+          { serviceType: "PT", serviceDate: "2026-02-30", billedAmountCents: 50_000 },
+        ],
+      }),
+    ).rejects.toBeInstanceOf(ValidationError);
+  });
 });
