@@ -26,29 +26,48 @@ No other infrastructure — the database is a local SQLite file.
 
 ## Quick start
 
-**One-liner (steps 0–4):** run `./setup.sh` from the repo root — it copies `.env.example`, installs deps, resets the DB, runs tests, and plays the demo. Then start the server manually with `cd app && npm run dev`.
+### Option A — Automated (recommended)
 
-Or manually:
+> **Zip download:** the zip ships `setup.sh.txt` to work around Gmail's `.sh` block. Rename it first:
+> ```bash
+> mv setup.sh.txt setup.sh && chmod +x setup.sh
+> ```
+
+Run from the repo root:
 
 ```bash
-# 0. Copy env file (sets DATABASE_URL)
+./setup.sh
+```
+
+This copies `.env.example`, installs deps, resets the DB, runs the test suite, and plays the demo. Then start the server:
+
+```bash
+cd app && npm run dev
+```
+
+---
+
+### Option B — Manual
+
+```bash
+# 1. Copy env file (sets DATABASE_URL)
 cp app/.env.example app/.env
 
-# 1. Install dependencies
+# 2. Install dependencies
 cd app
 npm install
 
-# 2. Push the schema and seed reference data
+# 3. Push the schema and seed reference data
 #    (creates app/prisma/dev.db with 4 plans, 5 members, pre-built accumulator history)
 npm run db:reset
 
-# 3. Run the test suite — should be 86 tests, all green
+# 4. Run the test suite — should be 86 tests, all green
 npm test
 
-# 4. Run the self-contained demo (8 scenarios, prints annotated output)
+# 5. Run the self-contained demo (8 scenarios, prints annotated output)
 npm run demo
 
-# 5. Start the API server (port 3000)
+# 6. Start the API server (port 3000)
 npm run dev
 ```
 
