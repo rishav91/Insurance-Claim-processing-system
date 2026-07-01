@@ -23,11 +23,23 @@ explicitly names.
 |---|---|---|
 | Language/runtime | **TypeScript / Node** | Daily-driver stack → time goes to the domain, not the tooling. |
 | Interface | **REST API** | Evaluators can `curl` the flows; demonstrates lifecycle + disputes better than a CLI. |
-| Persistence | **SQLite via Prisma** | Typed models double as schema docs; zero infra. Also gives a concrete single-writer concurrency story (see §5). |
+| Persistence | **SQLite via Prisma** | Typed models double as schema docs; zero infra for a take-home. Also gives a concrete single-writer concurrency story (see §5). |
 | Tests | **Vitest, behavior-first** | Specs encode domain rules (`domain-model.md` §7), written before/with code so git history shows TDD. |
 
 Persistence is real (not in-memory) specifically so the **accumulator** — the
 stateful heart of the domain — is exercised across requests, not faked.
+
+**What a production system would use instead.** SQLite is chosen for portability — a
+reviewer can clone and run with no external infra. A real money-path system would use
+**PostgreSQL**: full ACID guarantees under concurrent load, row-level `SELECT … FOR
+UPDATE` locking (the documented Postgres portability seam in §5), connection pooling
+(PgBouncer), and point-in-time recovery for the financial ledger. The concurrency design
+in §5 is already written against this target; SQLite is only the local approximation.
+For the **CoverageRule configuration** layer — plan definitions, benefit schedules,
+exclusion flags — a document store (e.g. MongoDB) is a reasonable alternative: rules are
+read-heavy, schema-flexible, and do not participate in the financial transaction. A
+separate read-optimised store for rule config would avoid mixing the rule-lookup concern
+with the ACID-critical ledger and claim tables.
 
 ## 3. The decisions that define the domain model
 
@@ -35,10 +47,26 @@ These are the choices a reviewer should interrogate me on.
 
 ### Coverage rules are **data interpreted by an engine**, not code
 A `CoverageRule` is a row (`serviceType`, `excluded`, fee schedule, copay/coinsurance,
-annual limit, review flag). A new benefit is a row, not a deploy. This is the
-centerpiece — it keeps policy *data* separate from adjudication *logic*. The
-alternative (rules as code/DSL) was rejected as over-engineering for the scope; a
-data table covers every rule we need and stays testable.
+annual limit, review flag). A new benefit is a row, not a deploy — updating a plan's
+copay, coinsurance rate, annual limit, or exclusion flag requires **no redeploy and no
+app restart**; the change is live at the next claim submission. This is the centerpiece
+decision and its direct operational consequence. It is also the concrete application of
+the **Open/Closed Principle**: the adjudication engine (closed to modification) is
+extended through data (open via new or changed rows), never through code changes. The
+alternative (rules as code/DSL) was rejected as over-engineering for the scope; a data
+table covers every rule we need and stays testable without mocking config.
+
+**Limitation — prospective-only rule changes not enforced.** `CoverageRule` rows are
+mutable with no effective-dating or version history on the rule itself (only `Policy`
+has effective windows). If a rule is edited *after* a claim is already adjudicated, a
+re-run of that line (via dispute overturn or manual-review approval) will silently apply
+the new rule rather than the rule as it stood at the time of service. The stored
+financial breakdown on `LineItem` (amounts, reasons) is frozen at the time of original
+adjudication — so the initial outcome is correct — but a re-adjudication reads the live
+`CoverageRule`. Real payer systems enforce prospective-only changes: rule edits carry a
+future effective date and historical adjudication always replays against the snapshot in
+force at the date of service. The fix is effective-dating on `CoverageRule` itself, or
+snapshotting the rule's key parameters onto the claim line at first adjudication.
 
 ### Plan and Policy are **separate** entities
 A **Plan** is the reusable benefit design (its coverage rules + deductible/limits); a
@@ -205,6 +233,7 @@ Each of these is a conscious trade-off; none is an accident.
 | **Re-dispute (multiple appeals per line)** | **One dispute per line** (`Dispute.lineItemId` is unique). A second dispute is a clean `409`, not a 500. One appeal cycle exercises the full reconciliation path; multi-level appeals add an appeal-history entity without new adjudication depth. | Drop the unique constraint → a `Dispute[]` history per line (mirrors the ledger's "one active + audit copies" model) + gate on "no *open* dispute." |
 | **Cross-claim cascade re-adjudication** | See §7 — accepted limitation, not a missing feature. | Dependency tracking across claims + re-run orchestration. |
 | **Override types beyond 3** | The full taxonomy is *defined* in the model; `WAIVE_LIMIT`/`MARK_ELIGIBLE`/`WAIVE_DEDUCTIBLE` prove both shapes (boolean + parameterized). | The remaining gates follow the identical pattern. |
+| **Client/admin API boundary** | All 10 endpoints sit flat under `/v1/*` with no separation between member-facing (submit, get, list, dispute, accumulators) and reviewer/admin-facing (adjudicate, pay, review pended lines, resolve disputes) surfaces. Auth is out of scope, so there is no seam for different authz scopes, rate limits, or independent versioning lifecycles. | Route prefixes `/v1/member/…` vs `/v1/internal/…` + an auth middleware per surface. |
 | **Auth / registration / multi-tenant** | Explicitly out of scope per the prompt. | — |
 
 ## 7. Known limitation I want to flag honestly
