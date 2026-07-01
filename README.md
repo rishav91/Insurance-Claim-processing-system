@@ -48,6 +48,12 @@ npm run dev
 > `npm run db:reset` = `prisma db push --force-reset` + seed. Run it any time you want
 > a clean slate. Individual reset: `npm run db:push` (schema only) or `npm run db:seed`.
 
+> **Troubleshooting:** If `db:reset` fails with _"The database disk image is malformed"_, a previous
+> interrupted reset left a corrupt file behind. Wipe it first:
+> ```bash
+> rm -f prisma/dev.db prisma/dev.db-shm prisma/dev.db-wal && npm run db:reset
+> ```
+
 ---
 
 ## Running tests
@@ -65,6 +71,22 @@ npx vitest run -t "deductible depletes across two claims"
 
 Tests are behavior-first: each spec encodes a domain rule from `docs/domain-model.md §7`.
 The git history shows the red → green slices.
+
+---
+
+## Inspecting the database
+
+[Prisma Studio](https://www.prisma.io/studio) is bundled with the project — no separate install needed.
+
+```bash
+cd app
+npx prisma studio          # opens http://localhost:5555
+```
+
+The browser UI shows every table (`Member`, `Plan`, `Policy`, `Claim`, `LineItem`,
+`AccumulatorEntry`, `AuditLog`, …) with clickable relations. Useful for verifying seeded
+accumulator history, checking claim state after running the demo, or browsing the ledger
+entries produced by a dispute resolution.
 
 ---
 
