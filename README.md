@@ -26,7 +26,14 @@ No other infrastructure — the database is a local SQLite file.
 
 ## Quick start
 
+**One-liner (steps 0–4):** run `./setup.sh` from the repo root — it copies `.env.example`, installs deps, resets the DB, runs tests, and plays the demo. Then start the server manually with `cd app && npm run dev`.
+
+Or manually:
+
 ```bash
+# 0. Copy env file (sets DATABASE_URL)
+cp app/.env.example app/.env
+
 # 1. Install dependencies
 cd app
 npm install
