@@ -28,12 +28,7 @@ No other infrastructure — the database is a local SQLite file.
 
 ### Option A — Automated (recommended)
 
-> **Zip download only:** the zip ships `setup.sh.txt` to work around Gmail's `.sh` block. From the **repo root**, run:
-> ```bash
-> [ -f setup.sh.txt ] && mv setup.sh.txt setup.sh; chmod +x setup.sh && ./setup.sh
-> ```
-
-Otherwise, from the repo root iff setup.sh already exists:
+From the repo root:
 
 ```bash
 chmod +x setup.sh && ./setup.sh
