@@ -28,15 +28,15 @@ No other infrastructure — the database is a local SQLite file.
 
 ### Option A — Automated (recommended)
 
-> **Zip download:** the zip ships `setup.sh.txt` to work around Gmail's `.sh` block. Rename it first:
+> **Zip download only:** the zip ships `setup.sh.txt` to work around Gmail's `.sh` block. From the **repo root**, run:
 > ```bash
-> mv setup.sh.txt setup.sh && chmod +x setup.sh
+> [ -f setup.sh.txt ] && mv setup.sh.txt setup.sh; chmod +x setup.sh && ./setup.sh
 > ```
 
-Run from the repo root:
+Otherwise, from the repo root:
 
 ```bash
-./setup.sh
+chmod +x setup.sh && ./setup.sh
 ```
 
 This copies `.env.example`, installs deps, resets the DB, runs the test suite, and plays the demo. Then start the server:
@@ -77,6 +77,7 @@ npm run dev
 > **Troubleshooting:** If `db:reset` fails with _"The database disk image is malformed"_, a previous
 > interrupted reset left a corrupt file behind. Wipe it first:
 > ```bash
+> cd app
 > rm -f prisma/dev.db prisma/dev.db-shm prisma/dev.db-wal && npm run db:reset
 > ```
 
