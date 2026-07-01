@@ -33,7 +33,7 @@ No other infrastructure — the database is a local SQLite file.
 > [ -f setup.sh.txt ] && mv setup.sh.txt setup.sh; chmod +x setup.sh && ./setup.sh
 > ```
 
-Otherwise, from the repo root:
+Otherwise, from the repo root iff setup.sh already exists:
 
 ```bash
 chmod +x setup.sh && ./setup.sh
