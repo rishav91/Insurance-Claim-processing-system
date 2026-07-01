@@ -405,8 +405,8 @@ async function run() {
   console.log(` ✓ 4 plans · 5 members · 1 provider seeded`);
   console.log(` ✓ Prior-history claims adjudicated (Alice, Bob, Carol, David)`);
 
-  const scenario2Claim = await scenario2(seed);
   await scenario1(seed);
+  const scenario2Claim = await scenario2(seed);
   await scenario3(seed);
   await scenario4(seed);
   await scenario5(seed);
